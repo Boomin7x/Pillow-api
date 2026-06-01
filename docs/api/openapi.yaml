@@ -1,0 +1,476 @@
+openapi: 3.0.3
+
+info:
+  title: Pillow API
+  description: |
+    Real-estate listing platform API.
+
+    **Authentication model**
+    - Access tokens are short-lived RS256 JWTs (15 min). Pass in the `Authorization: Bearer <token>` header.
+    - Refresh tokens are opaque 256-bit random strings stored in a `refresh_token` `httpOnly` cookie. They rotate on every use (family rotation). Replaying a rotated token signals theft and revokes the entire session family.
+    - Logout blocklists the current access token's `jti` in Redis for the remainder of its TTL.
+
+    **Error shape**
+    Every error response uses the `AppError` schema below. Map `code` to user-facing messages in your client — never rely on `message` strings.
+
+    **Adding a new domain**
+    Add a new `tags` entry, a path group under `paths`, and reusable schemas under `components/schemas`. Follow the pattern established by the `auth` domain.
+  version: 0.1.0
+  contact:
+    name: Pillow Engineering
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.pillow.app
+    description: Production
+
+tags:
+  - name: auth
+    description: Identity, sessions, and token lifecycle
+  - name: health
+    description: Liveness and readiness probes
+
+# ---------------------------------------------------------------------------
+# PATHS
+# ---------------------------------------------------------------------------
+
+paths:
+
+  # --- Health ---------------------------------------------------------------
+
+  /health/live:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      description: Returns 200 when the process is running. Used by orchestrators to detect deadlocks.
+      operationId: healthLive
+      security: []
+      responses:
+        "200":
+          description: Process is alive
+
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      description: Returns 200 when Postgres and Redis are reachable. Orchestrators remove the pod from rotation when this fails.
+      operationId: healthReady
+      security: []
+      responses:
+        "200":
+          description: All dependencies healthy
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  # --- Auth -----------------------------------------------------------------
+
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: Register a new account
+      description: |
+        Creates a new user and credential record, then issues a token pair.
+        The refresh token is set as an `httpOnly` cookie; the access token is returned in the response body.
+      operationId: authRegister
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+            examples:
+              typical:
+                summary: Standard registration
+                value:
+                  email: alice@example.com
+                  password: "hunter2secure!"
+                  display_name: Alice Wonderland
+      responses:
+        "201":
+          description: Account created
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/RefreshTokenCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+              examples:
+                success:
+                  $ref: "#/components/examples/AuthResponseExample"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Email + password login
+      description: |
+        Verifies the password with bcrypt (cost 12) and issues a token pair on success.
+        Returns `401` for both unknown email and wrong password to prevent user enumeration.
+        The response timing is constant regardless of whether the email exists.
+      operationId: authLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            examples:
+              typical:
+                summary: Valid credentials
+                value:
+                  email: alice@example.com
+                  password: "hunter2secure!"
+      responses:
+        "200":
+          description: Authenticated
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/RefreshTokenCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+              examples:
+                success:
+                  $ref: "#/components/examples/AuthResponseExample"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate refresh token and issue new access token
+      description: |
+        Reads the `refresh_token` cookie, validates it against Redis and Postgres, then performs family rotation:
+        the old token is revoked and a new pair is issued.
+
+        **Theft detection**: if an already-rotated token is submitted, the entire family is revoked
+        and `401` is returned. The legitimate user must re-authenticate.
+      operationId: authRefresh
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/RefreshTokenCookie"
+      responses:
+        "200":
+          description: New token pair issued
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/RefreshTokenCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+              examples:
+                success:
+                  $ref: "#/components/examples/AuthResponseExample"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Logout and revoke session
+      description: |
+        Blocklists the current access token's `jti` in Redis (TTL = remaining token lifetime).
+        Revokes the refresh token in both Redis and Postgres.
+        Clears the `refresh_token` cookie.
+      operationId: authLogout
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RefreshTokenCookie"
+      responses:
+        "204":
+          description: Logged out successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# ---------------------------------------------------------------------------
+# COMPONENTS
+# ---------------------------------------------------------------------------
+
+components:
+
+  # --- Security -------------------------------------------------------------
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        RS256-signed JWT. Obtain via `/auth/login` or `/auth/register`.
+        Payload claims: `sub` (user UUID), `email`, `roles`, `sid` (session/family UUID), `jti` (token UUID for blocklisting).
+        Lifetime: 15 minutes.
+
+  # --- Parameters -----------------------------------------------------------
+
+  parameters:
+    RefreshTokenCookie:
+      name: refresh_token
+      in: cookie
+      required: false
+      description: Opaque 256-bit refresh token (httpOnly, Secure, SameSite=Strict). Set automatically by login/register responses.
+      schema:
+        type: string
+
+  # --- Headers --------------------------------------------------------------
+
+  headers:
+    RefreshTokenCookie:
+      description: Sets the `refresh_token` httpOnly cookie (30-day TTL, path=/auth/refresh).
+      schema:
+        type: string
+        example: "refresh_token=<opaque>; Path=/auth/refresh; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000"
+
+  # --- Request schemas ------------------------------------------------------
+
+  schemas:
+
+    RegisterRequest:
+      type: object
+      required: [email, password, display_name]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          minLength: 8
+          format: password
+          example: "hunter2secure!"
+          description: Minimum 8 characters. Hashed with bcrypt cost 12. Never stored or logged in plaintext.
+        display_name:
+          type: string
+          minLength: 2
+          maxLength: 100
+          example: Alice Wonderland
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          format: password
+          example: "hunter2secure!"
+
+    # --- Response schemas ---------------------------------------------------
+
+    AuthResponse:
+      type: object
+      required: [access_token, token_type, user]
+      properties:
+        access_token:
+          type: string
+          description: RS256-signed JWT. Valid for 15 minutes.
+          example: eyJhbGciOiJSUzI1NiIsImtpZCI6InBpbGxvdy0yMDI1LXExIiwidHlwIjoiSldUIn0...
+        token_type:
+          type: string
+          enum: [Bearer]
+          example: Bearer
+        user:
+          $ref: "#/components/schemas/UserPayload"
+
+    UserPayload:
+      type: object
+      required: [id, email, display_name]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 018e7b3a-1234-7000-8000-abcdef012345
+          description: UUID v7 (time-sortable).
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        display_name:
+          type: string
+          example: Alice Wonderland
+
+    AppError:
+      type: object
+      required: [code, message]
+      description: |
+        Unified error shape returned by all endpoints.
+        Map `code` to user-facing messages in clients. Never rely on the `message` string in production logic.
+      properties:
+        code:
+          type: string
+          enum:
+            - BAD_REQUEST
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - NOT_FOUND
+            - CONFLICT
+            - VALIDATION
+            - RATE_LIMIT
+            - INTERNAL
+          example: VALIDATION
+        message:
+          type: string
+          example: "password: must be at least 8 characters"
+        detail:
+          type: string
+          description: Optional. Present only when additional context aids debugging.
+          example: "field: password, tag: min, value: 8"
+
+  # --- Reusable responses ---------------------------------------------------
+
+  responses:
+
+    Unauthorized:
+      description: Missing, expired, revoked, or invalid access token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AppError"
+          examples:
+            missing_token:
+              summary: No Authorization header
+              value:
+                code: UNAUTHORIZED
+                message: missing or malformed Authorization header
+            invalid_token:
+              summary: Expired or tampered JWT
+              value:
+                code: UNAUTHORIZED
+                message: invalid or expired access token
+            theft_detected:
+              summary: Rotated refresh token replayed — family revoked
+              value:
+                code: UNAUTHORIZED
+                message: "session invalidated — please log in again"
+
+    Forbidden:
+      description: Authenticated but insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AppError"
+          example:
+            code: FORBIDDEN
+            message: you do not have permission to perform this action
+
+    NotFound:
+      description: Resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AppError"
+          example:
+            code: NOT_FOUND
+            message: resource not found
+
+    Conflict:
+      description: Unique constraint violation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AppError"
+          example:
+            code: CONFLICT
+            message: email already registered
+
+    Validation:
+      description: Request body failed validation (invalid format, missing required fields)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AppError"
+          examples:
+            invalid_email:
+              summary: Invalid email format
+              value:
+                code: VALIDATION
+                message: "Key: 'RegisterRequest.Email' Error:Field validation for 'Email' failed on the 'email' tag"
+            short_password:
+              summary: Password too short
+              value:
+                code: VALIDATION
+                message: "Key: 'RegisterRequest.Password' Error:Field validation for 'Password' failed on the 'min' tag"
+
+    RateLimit:
+      description: Too many requests
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying
+          schema:
+            type: integer
+            example: 60
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AppError"
+          example:
+            code: RATE_LIMIT
+            message: too many requests — retry after 60 seconds
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AppError"
+          example:
+            code: INTERNAL
+            message: an unexpected error occurred
+
+    ServiceUnavailable:
+      description: A required dependency (Postgres, Redis) is unreachable
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AppError"
+          example:
+            code: INTERNAL
+            message: service unavailable
+
+  # --- Reusable examples ----------------------------------------------------
+
+  examples:
+    AuthResponseExample:
+      summary: Successful auth response
+      value:
+        access_token: eyJhbGciOiJSUzI1NiIsImtpZCI6InBpbGxvdy0yMDI1LXExIiwidHlwIjoiSldUIn0.eyJlbWFpbCI6ImFsaWNlQGV4YW1wbGUuY29tIiwiZXhwIjoxNzE2MDAwMDAwLCJpYXQiOjE3MTU5OTkxMDAsImp0aSI6ImFiYzEyMyIsInJvbGVzIjpbInVzZXIiXSwic2lkIjoiZmFtaWx5LXV1aWQiLCJzdWIiOiJ1c2VyLXV1aWQifQ.signature
+        token_type: Bearer
+        user:
+          id: 018e7b3a-1234-7000-8000-abcdef012345
+          email: alice@example.com
+          display_name: Alice Wonderland
+
+# ---------------------------------------------------------------------------
+# Global security default — all routes require Bearer unless overridden
+# ---------------------------------------------------------------------------
+
+security:
+  - bearerAuth: []

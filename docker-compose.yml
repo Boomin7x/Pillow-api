@@ -1,0 +1,52 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://pillow:secret@postgres:5432/pillow_dev?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      JWT_PRIVATE_KEY_PATH: /run/secrets/private.pem
+      JWT_PUBLIC_KEY_PATH: /run/secrets/public.pem
+    volumes:
+      - ./secrets:/run/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pillow
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: pillow_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pillow -d pillow_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory-policy volatile-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:

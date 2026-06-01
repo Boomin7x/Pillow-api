@@ -1,0 +1,44 @@
+.PHONY: run build test lint migrate-up migrate-down keys docker-up docker-down
+
+# ── Dev ──────────────────────────────────────────────────────────────────────
+
+run:
+	go run ./cmd/api
+
+build:
+	go build -ldflags="-s -w" -o bin/api ./cmd/api
+	go build -ldflags="-s -w" -o bin/migrate ./cmd/migrate
+
+test:
+	go test ./... -count=1
+
+test-cover:
+	go test ./... -count=1 -coverprofile=coverage.out
+	go tool cover -html=coverage.out -o coverage.html
+
+lint:
+	golangci-lint run ./...
+
+# ── Database ─────────────────────────────────────────────────────────────────
+
+migrate-up:
+	go run ./cmd/migrate up
+
+migrate-down:
+	go run ./cmd/migrate down
+
+# ── Keys ─────────────────────────────────────────────────────────────────────
+
+keys:
+	@mkdir -p secrets
+	openssl genrsa -out secrets/private.pem 4096
+	openssl rsa -in secrets/private.pem -pubout -out secrets/public.pem
+	@echo "Keys written to secrets/. Add secrets/ to .gitignore."
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+
+docker-up:
+	docker compose up --build -d
+
+docker-down:
+	docker compose down -v

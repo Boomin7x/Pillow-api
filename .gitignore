@@ -1,0 +1,16 @@
+# Binaries
+bin/
+*.exe
+
+# Secrets — never commit
+.env
+secrets/
+
+# Coverage
+coverage.out
+coverage.html
+
+# Editor
+.idea/
+.vscode/
+*.swp
