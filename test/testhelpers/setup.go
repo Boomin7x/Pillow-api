@@ -10,10 +10,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// NewPostgres returns a real *gorm.DB connected to a test Postgres instance.
-// In CI, use testcontainers-go to spin up the container before calling this.
-// The DSN is expected via the TEST_DATABASE_URL environment variable or the
-// provided dsn argument.
 func NewPostgres(t *testing.T, ctx context.Context, dsn string) *gorm.DB {
 	t.Helper()
 
@@ -48,7 +44,6 @@ func NewPostgres(t *testing.T, ctx context.Context, dsn string) *gorm.DB {
 	return db
 }
 
-// MustExec runs a raw SQL statement against db and fails the test on error.
 func MustExec(t *testing.T, db *gorm.DB, sql string, args ...any) {
 	t.Helper()
 	if err := db.Exec(fmt.Sprintf(sql, args...)).Error; err != nil {

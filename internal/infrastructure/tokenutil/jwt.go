@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
 	"time"
 
@@ -138,6 +139,22 @@ func (j *jwtIssuer) ValidateAccessToken(raw string) (*domain.Claims, error) {
 		TokenID:   stringClaim(mc, "jti"),
 		SessionID: stringClaim(mc, "sid"),
 	}, nil
+}
+
+func (j *jwtIssuer) PublicKeySet() []domain.JWK {
+	nBytes := j.publicKey.N.Bytes()
+	eBytes := big.NewInt(int64(j.publicKey.E)).Bytes()
+
+	return []domain.JWK{
+		{
+			KeyType:   "RSA",
+			Use:       "sig",
+			Algorithm: "RS256",
+			KeyID:     j.keyID,
+			N:         base64.RawURLEncoding.EncodeToString(nBytes),
+			E:         base64.RawURLEncoding.EncodeToString(eBytes),
+		},
+	}
 }
 
 func stringClaim(mc jwt.MapClaims, key string) string {

@@ -13,9 +13,11 @@ type LoginRequest struct {
 	Password string `json:"password" validate:"required"`
 }
 
-type RefreshRequest struct {
-	// Refresh token is read from the httpOnly cookie, not the body.
-	// This struct is intentionally empty but kept for consistency.
+type RefreshRequest struct{}
+
+type ChangePasswordRequest struct {
+	OldPassword string `json:"old_password" validate:"required"`
+	NewPassword string `json:"new_password" validate:"required,min=8"`
 }
 
 type AuthResponse struct {

@@ -2,11 +2,9 @@ package auth
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/kodiahbertrand/pillow/internal/apperrors"
@@ -21,7 +19,7 @@ type authRepository struct {
 	redis *redis.Client
 }
 
-func NewRepository(db *gorm.DB, rdb *redis.Client) domain.AuthRepository {
+func NewRepository(db *gorm.DB, rdb *redis.Client) *authRepository {
 	return &authRepository{db: db, redis: rdb}
 }
 
@@ -106,7 +104,17 @@ func (r *authRepository) RevokeRefreshToken(ctx context.Context, id string) erro
 	if err := r.db.WithContext(ctx).Model(&pgmodels.RefreshTokenModel{}).
 		Where("id = ?", id).
 		Update("revoked_at", now).Error; err != nil {
-		return fmt.Errorf("auth: revoke refresh token: %w", err)
+		return fmt.Errorf("auth: revoke refresh token by id: %w", err)
+	}
+	return nil
+}
+
+func (r *authRepository) RevokeRefreshTokenByHash(ctx context.Context, hash string) error {
+	now := time.Now()
+	if err := r.db.WithContext(ctx).Model(&pgmodels.RefreshTokenModel{}).
+		Where("token_hash = ?", hash).
+		Update("revoked_at", now).Error; err != nil {
+		return fmt.Errorf("auth: revoke refresh token by hash: %w", err)
 	}
 	return nil
 }
@@ -121,12 +129,22 @@ func (r *authRepository) RevokeTokenFamily(ctx context.Context, familyID string)
 	return nil
 }
 
-func (r *authRepository) RevokeAllUserRefreshTokens(ctx context.Context, userID string) error {
+func (r *authRepository) RevokeAllUserRefreshTokens(ctx context.Context, userID string) (int64, error) {
 	now := time.Now()
-	if err := r.db.WithContext(ctx).Model(&pgmodels.RefreshTokenModel{}).
+	result := r.db.WithContext(ctx).Model(&pgmodels.RefreshTokenModel{}).
 		Where("user_id = ? AND revoked_at IS NULL", userID).
-		Update("revoked_at", now).Error; err != nil {
-		return fmt.Errorf("auth: revoke all user refresh tokens: %w", err)
+		Update("revoked_at", now)
+	if result.Error != nil {
+		return 0, fmt.Errorf("auth: revoke all user refresh tokens: %w", result.Error)
+	}
+	return result.RowsAffected, nil
+}
+
+func (r *authRepository) UpdateCredentialPassword(ctx context.Context, userID, passwordHash string) error {
+	if err := r.db.WithContext(ctx).Model(&pgmodels.CredentialModel{}).
+		Where("user_id = ?", userID).
+		Update("password_hash", passwordHash).Error; err != nil {
+		return fmt.Errorf("auth: update credential password: %w", err)
 	}
 	return nil
 }
@@ -155,6 +173,44 @@ func (r *authRepository) FindOAuthIdentity(ctx context.Context, provider, provid
 		return nil, fmt.Errorf("auth: find oauth identity: %w", err)
 	}
 	return model.ToDomain(), nil
+}
+
+func (r *authRepository) FindOAuthIdentityByUserAndProvider(ctx context.Context, userID, provider string) (*domain.OAuthIdentity, error) {
+	var model pgmodels.OAuthIdentityModel
+	if err := r.db.WithContext(ctx).
+		Where("user_id = ? AND provider = ?", userID, provider).
+		First(&model).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NotFound("oauth identity not found")
+		}
+		return nil, fmt.Errorf("auth: find oauth identity by user and provider: %w", err)
+	}
+	return model.ToDomain(), nil
+}
+
+func (r *authRepository) SaveVerifier(ctx context.Context, state, verifier string, ttl time.Duration) error {
+	if err := r.redis.Set(ctx, pkceKey(state), verifier, ttl).Err(); err != nil {
+		return fmt.Errorf("auth: save pkce verifier: %w", err)
+	}
+	return nil
+}
+
+func (r *authRepository) GetVerifier(ctx context.Context, state string) (string, error) {
+	verifier, err := r.redis.Get(ctx, pkceKey(state)).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return "", apperrors.NotFound("oauth state not found or expired")
+		}
+		return "", fmt.Errorf("auth: get pkce verifier: %w", err)
+	}
+	return verifier, nil
+}
+
+func (r *authRepository) DeleteVerifier(ctx context.Context, state string) error {
+	if err := r.redis.Del(ctx, pkceKey(state)).Err(); err != nil {
+		return fmt.Errorf("auth: delete pkce verifier: %w", err)
+	}
+	return nil
 }
 
 func (r *authRepository) CacheRefreshToken(ctx context.Context, hash string, meta domain.RefreshTokenMeta, ttl time.Duration) error {
@@ -190,10 +246,6 @@ func (r *authRepository) DeleteCachedRefreshToken(ctx context.Context, hash stri
 	return nil
 }
 
-func (r *authRepository) DeleteCachedTokenFamily(_ context.Context, _ string) error {
-	return nil
-}
-
 func (r *authRepository) BlocklistToken(ctx context.Context, jti string, ttl time.Duration) error {
 	if err := r.redis.Set(ctx, blocklistKey(jti), 1, ttl).Err(); err != nil {
 		return fmt.Errorf("auth: blocklist token: %w", err)
@@ -209,15 +261,9 @@ func (r *authRepository) IsTokenBlocklisted(ctx context.Context, jti string) (bo
 	return exists > 0, nil
 }
 
-func (r *authRepository) LogEvent(ctx context.Context, event *domain.AuthEvent) {
-	model := pgmodels.AuthEventModelFrom(event)
-	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
-		slog.Error("auth: write audit event", "event_type", event.EventType, "error", err)
-	}
-}
-
 func refreshKey(hash string) string  { return "refresh:" + hash }
 func blocklistKey(jti string) string { return "blocklist:" + jti }
+func pkceKey(state string) string    { return "pkce:" + state }
 
 func isDuplicateKey(err error) bool {
 	return err != nil && (containsStr(err.Error(), "23505") || containsStr(err.Error(), "duplicate key"))
@@ -231,5 +277,3 @@ func containsStr(s, sub string) bool {
 	}
 	return false
 }
-
-var _ = sha256.Sum256 // used indirectly via hashToken in service

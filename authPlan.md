@@ -75,32 +75,15 @@ Exponential backoff: after the per-email limit is hit, double the lockout window
 
 **Checklist:**
 
-- [ ] Add `RateLimiter` interface to `internal/domain/auth.go`:
-  ```go
-  type RateLimiter interface {
-      Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error)
-      Remaining(ctx context.Context, key string, limit int, window time.Duration) (int, error)
-  }
-  ```
-- [ ] Implement `redisRateLimiter` in `internal/auth/repository.go` (or new `internal/infrastructure/redis/ratelimiter.go`) using ZADD + ZREMRANGEBYSCORE + ZCARD in a single Lua script (atomicity guarantee)
-- [ ] Create `internal/middleware/ratelimit.go`:
-  - `LimitByIP(store RateLimiter, limit int, window time.Duration) fiber.Handler`
-  - `LimitByEmail(store RateLimiter, limit int, window time.Duration) fiber.Handler` (reads body, hashes email, resets body reader)
-- [ ] Set `Retry-After` response header on 429 responses (seconds until window resets)
-- [ ] Apply limiters in `internal/app/router.go` to each auth route
-- [ ] Add rate limiter config to `internal/config/config.go`:
-  ```go
-  type RateLimitConfig struct {
-      LoginIPLimit      int
-      LoginEmailLimit   int
-      RegisterIPLimit   int
-      RefreshIPLimit    int
-      OAuthIPLimit      int
-  }
-  ```
-- [ ] Document new env vars in `.env.example`
-- [ ] Update `docs/api/openapi.yaml` — add `429` responses with `Retry-After` header to login, register, refresh
-- [ ] Write unit tests: `internal/middleware/ratelimit_test.go` — mock the `RateLimiter` interface, test allow/block/backoff paths
+- [x] Add `RateLimiter`, `EmailRateLimiter`, `AuditLogger` interfaces to `internal/domain/auth.go`
+- [x] Implement `redisRateLimiter` in `internal/infrastructure/redis/ratelimiter.go` using ZADD + ZREMRANGEBYSCORE + ZCARD Lua script (atomic sliding window)
+- [x] Create `internal/middleware/ratelimit.go` — `LimitByIP` and `LimitByEmail` (SHA-256 hashes email, exponential backoff on repeated violations)
+- [x] Set `Retry-After` response header on 429 responses
+- [x] Apply limiters in `internal/app/router.go` to register, login, refresh routes
+- [x] Add `RateLimitConfig` to `internal/config/config.go` with all window/limit fields
+- [x] Document all rate limit env vars in `.env.example`
+- [x] Update `docs/api/openapi.yaml` — added `429` to register; login and refresh already had it
+- [x] Write unit tests: `internal/middleware/ratelimit_test.go` — allow, block, fail-open, email hashing, PII protection
 
 ---
 
@@ -112,14 +95,10 @@ Currently `LogEvent` is synchronous — a slow Postgres write adds latency to th
 
 The writer must flush its buffer on shutdown (graceful shutdown in Phase 4 depends on this).
 
-- [ ] Create `internal/auth/auditlogger.go`:
-  - `type auditLogger struct { ch chan *domain.AuthEvent; db *gorm.DB }`
-  - `func NewAuditLogger(db *gorm.DB, bufSize int) *auditLogger`
-  - `func (l *auditLogger) Log(event *domain.AuthEvent)` — non-blocking send on channel; drop + slog.Error if channel full
-  - `func (l *auditLogger) Run(ctx context.Context)` — goroutine: select on 100ms ticker or batch size 50, INSERT all pending events in one query; exit cleanly when ctx is cancelled after flushing
-- [ ] Change `domain.AuthRepository.LogEvent` signature to accept the logger as a dependency (or inject `*auditLogger` into `authRepository` alongside `*gorm.DB` and `*redis.Client`)
-- [ ] Start `auditLogger.Run(ctx)` in `internal/app/app.go`; pass the cancel func to `App.Shutdown()`
-- [ ] Write unit tests: verify that `Log()` is non-blocking under channel pressure and that `Run()` flushes all pending events before returning
+- [x] Created `internal/auth/auditlogger.go` — channel-buffered (256), 100ms ticker, batch of 50, flushes on ctx cancel
+- [x] Removed `LogEvent` from `domain.AuthRepository`; `AuditLogger` interface injected into `authService` as a separate dependency
+- [x] `auditLogger.Run(ctx)` started as goroutine in `internal/app/app.go`; `App.Shutdown()` calls `cancel()` and blocks on `loggerDone` channel until flush completes
+- [x] `authService.NewService` updated to accept `domain.AuditLogger` as third parameter; all service tests updated with `mockAuditLogger`
 
 ---
 
@@ -129,10 +108,9 @@ The writer must flush its buffer on shutdown (graceful shutdown in Phase 4 depen
 
 The current `/health/ready` always returns 200. It must actually verify connectivity.
 
-- [ ] Inject `*gorm.DB` and `*redis.Client` into the readiness handler in `internal/app/router.go`
-- [ ] Ping Postgres via `sqlDB.PingContext(ctx)` and Redis via `rdb.Ping(ctx)` with a 2-second timeout
-- [ ] Return 503 with `AppError{Code: CodeInternal}` if either fails
-- [ ] Update `docs/api/openapi.yaml` — add `503` response to `/health/ready`
+- [x] `*gorm.DB` and `*goredis.Client` injected into `routeDeps` in `internal/app/router.go`
+- [x] `/health/ready` pings both with a 2-second `context.WithTimeout`; returns 503 if either fails
+- [x] `docs/api/openapi.yaml` already had `503` on `/health/ready` — confirmed present
 
 ---
 
@@ -150,21 +128,11 @@ Expose `GET /.well-known/jwks.json` returning the RSA public key in JWK format. 
 
 The response is cacheable — add `Cache-Control: public, max-age=300` so downstream services auto-refresh every 5 minutes without hammering the endpoint.
 
-- [ ] Add `PublicKeySet() ([]JWK, error)` to `domain.TokenIssuer` interface
-- [ ] Implement in `internal/infrastructure/tokenutil/jwt.go`:
-  - Encode `rsa.PublicKey` as JWK (`kty`, `use`, `alg`, `kid`, `n`, `e`)
-  - Return as `[]JWK` — slice supports serving multiple keys during rotation window
-- [ ] Create `GET /.well-known/jwks.json` route in `internal/app/router.go`:
-  ```go
-  f.Get("/.well-known/jwks.json", func(c *fiber.Ctx) error {
-      c.Set("Cache-Control", "public, max-age=300")
-      keys, err := deps.issuer.PublicKeySet()
-      ...
-      return c.JSON(fiber.Map{"keys": keys})
-  })
-  ```
-- [ ] Update `docs/api/openapi.yaml` — document the JWKS endpoint and JWK schema
-- [ ] Write unit test: verify JWK `n` and `e` values decode back to the original public key modulus and exponent
+- [x] Added `JWK` struct and `PublicKeySet() []JWK` to `domain.TokenIssuer` interface
+- [x] Implemented in `internal/infrastructure/tokenutil/jwt.go` — encodes RSA public key as JWK with `kty`, `use`, `alg`, `kid`, `n`, `e` fields (base64url-encoded modulus and exponent)
+- [x] Created `GET /.well-known/jwks.json` route in `internal/app/router.go` with `Cache-Control: public, max-age=300`
+- [x] Updated `docs/api/openapi.yaml` — added `/.well-known/jwks.json` endpoint under discovery tag, added `JWK` and `JWKSet` schemas
+- [x] Wrote unit tests in `internal/infrastructure/tokenutil/jwt_test.go` — verified JWK `n` and `e` values decode back to original public key; verified round-trip correctness
 
 ---
 
@@ -172,10 +140,10 @@ The response is cacheable — add `Cache-Control: public, max-age=300` so downst
 
 **Design reference:** AuthDesign.md §10.6
 
-- [ ] Change `app.Shutdown()` to call `fiberApp.ShutdownWithTimeout(10 * time.Second)`
-- [ ] Add a `context.CancelFunc` to `App` struct to signal the audit logger goroutine to flush and stop
-- [ ] In `cmd/api/main.go`: on SIGTERM, call `a.Shutdown()` and `cancel()` in order; wait for the audit logger to confirm flush completion before `os.Exit`
-- [ ] Add a `Done() <-chan struct{}` method to `auditLogger` so `main.go` can block until flush is complete
+- [x] `app.Shutdown()` calls `fiberApp.ShutdownWithTimeout(10 * time.Second)` (Phase 1)
+- [x] `context.CancelFunc` added to `App` struct to signal goroutines (Phase 1)
+- [x] `auditLogger.Done()` returns `<-chan struct{}` for shutdown coordination (Phase 1)
+- [x] Audit logger drains remaining events on context cancel (Phase 1)
 
 ---
 
@@ -192,12 +160,9 @@ WHERE expires_at < NOW()
    OR (revoked_at IS NOT NULL AND revoked_at < NOW() - INTERVAL '90 days');
 ```
 
-- [ ] Create `internal/auth/cleanup.go`:
-  - `type tokenCleanup struct { db *gorm.DB }`
-  - `func NewTokenCleanup(db *gorm.DB) *tokenCleanup`
-  - `func (c *tokenCleanup) Run(ctx context.Context, interval time.Duration)` — ticker loop, runs SQL above, logs rows deleted and duration
-- [ ] Wire into `internal/app/app.go` — start as a goroutine, respect shutdown context
-- [ ] Consider a separate `cmd/worker/main.go` binary for this if the cleanup interval is daily (preferred for separation of concerns — the API binary doesn't need a scheduler)
+- [x] Created `internal/auth/cleanup.go` with `tokenCleanup` struct, `NewTokenCleanup()` constructor, `Run(ctx, interval)` ticker loop, and `deleteExpired()` method that logs rows deleted
+- [x] Wired into `internal/app/app.go` — started as goroutine with 24-hour interval, respects shutdown context
+- [ ] Consider a separate `cmd/worker/main.go` binary for cleanup if needed (currently co-located in API for simplicity)
 
 ---
 
@@ -209,17 +174,12 @@ WHERE expires_at < NOW()
 
 ### 3.1 — OAuth Config + Dependencies
 
-- [ ] Add `golang.org/x/oauth2` and `golang.org/x/oauth2/google` to `go.mod` (`go get golang.org/x/oauth2`)
-- [ ] Extend `internal/config/config.go` — `OAuthConfig` already has the fields; verify `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URL` are required (currently optional — make them required or conditionally required)
-- [ ] Add a `PKCEStore` interface to `internal/domain/auth.go` for storing the `code_verifier` between the initiation and callback:
-  ```go
-  type PKCEStore interface {
-      SaveVerifier(ctx context.Context, state string, verifier string, ttl time.Duration) error
-      GetVerifier(ctx context.Context, state string) (string, error)
-      DeleteVerifier(ctx context.Context, state string) error
-  }
-  ```
-- [ ] Implement `redisPKCEStore` in `internal/auth/repository.go` (Redis keys: `pkce:<state>`, TTL 10 minutes)
+- [x] Added `golang.org/x/oauth2` and `golang.org/x/oauth2/google` to `go.mod`
+- [x] `OAuthConfig` already has all fields (`GoogleClientID`, `GoogleClientSecret`, `GoogleRedirectURL`) — no schema change needed
+- [x] Added `PKCEStore` interface to `internal/domain/auth.go` with `SaveVerifier`, `GetVerifier`, `DeleteVerifier`
+- [x] Added `OAuthProvider` interface to `internal/domain/auth.go` with `BuildAuthURL` and `ExchangeAndVerify`
+- [x] Implemented PKCE store methods on `authRepository` in `internal/auth/repository.go` (Redis key: `pkce:<state>`, TTL 10 minutes)
+- [x] Created `internal/infrastructure/oauth/google.go` — wraps `golang.org/x/oauth2`, implements `domain.OAuthProvider`, decodes JWT claims without external JWKS fetch (iss + aud verification)
 
 ---
 
@@ -227,21 +187,14 @@ WHERE expires_at < NOW()
 
 **Endpoint:** `GET /auth/google`
 
-- [ ] Add `OAuthInitiate(c *fiber.Ctx) error` to `authHandler`
-- [ ] Generate a cryptographically random `state` (32 bytes, base64url) — CSRF protection
-- [ ] Generate a cryptographically random `code_verifier` (43–128 chars, base64url, RFC 7636 §4.1)
-- [ ] Derive `code_challenge = BASE64URL(SHA256(code_verifier))`
-- [ ] Persist `state → code_verifier` in Redis via `PKCEStore.SaveVerifier` (TTL 10 minutes)
-- [ ] Build Google OAuth URL with:
-  - `response_type=code`
-  - `code_challenge_method=S256`
-  - `code_challenge=<derived>`
-  - `state=<random>`
-  - `access_type=offline`
-  - `prompt=consent`
-- [ ] Return `302 Redirect` to the Google consent screen
-- [ ] Register `GET /auth/google` in `internal/app/router.go` with the IP rate limiter (Phase 1.1)
-- [ ] Add `GET /auth/google` to `docs/api/openapi.yaml`
+- [x] Added `OAuthInitiate(c *fiber.Ctx) error` to `authHandler`
+- [x] Generates 32-byte random `state` (base64url) and 64-byte random `code_verifier` (base64url, 86 chars — within RFC 7636 43–128 range)
+- [x] Derives `code_challenge = BASE64URL(SHA-256(code_verifier))`
+- [x] Persists `state → code_verifier` in Redis via `PKCEStore.SaveVerifier` (10-minute TTL)
+- [x] Builds Google OAuth URL with `code_challenge_method=S256`, `access_type=offline`, `prompt=consent`
+- [x] Returns `302 Redirect` to Google consent screen
+- [x] Registered `GET /auth/google` in `internal/app/router.go` with IP rate limiter (20 req / 60 s)
+- [x] Added `GET /auth/google` to `docs/api/openapi.yaml`
 
 ---
 
@@ -249,27 +202,21 @@ WHERE expires_at < NOW()
 
 **Endpoint:** `GET /auth/google/callback`
 
-- [ ] Add `OAuthCallback(c *fiber.Ctx) error` to `authHandler`
-- [ ] Extract `code` and `state` query params; return 400 if either is missing
-- [ ] Look up `code_verifier` from Redis by `state`; return 400 if not found or expired
-- [ ] Delete the `state` key immediately (one-time use)
-- [ ] Exchange `code` + `code_verifier` for Google tokens using `golang.org/x/oauth2`
-- [ ] Verify the Google `id_token`:
-  - Validate audience matches `GOOGLE_CLIENT_ID`
-  - Validate `iss` is `accounts.google.com` or `https://accounts.google.com`
-  - Extract `sub` (provider_id) and `email`
-- [ ] Discard Google tokens — Pillow issues its own pair
-- [ ] Account linking logic (all in `authService.OAuthLogin`):
-  1. Look up `oauth_identities` by `(provider=google, provider_id=<sub>)`
-  2. **Found:** load the linked user, issue Pillow token pair
-  3. **Not found, email matches existing user:** link the identity, issue token pair
-  4. **Not found, no email match:** create new `users` row, create `oauth_identities` row, issue token pair
-  5. **Email linked to a different Google account:** return 409 Conflict
-- [ ] Add `OAuthLogin(ctx, OAuthLoginInput) (*AuthResult, error)` to `domain.AuthService` and implement in `internal/auth/service.go`
-- [ ] Log `oauth_login` or `oauth_link` audit event
-- [ ] Set refresh cookie, return `AuthResponse`
-- [ ] Register `GET /auth/google/callback` in `internal/app/router.go`
-- [ ] Add both OAuth endpoints to `docs/api/openapi.yaml`
+- [x] Added `OAuthCallback(c *fiber.Ctx) error` to `authHandler`
+- [x] Extracts `code` and `state` from query params; returns 400 if either is missing
+- [x] Looks up `code_verifier` from Redis by `state`; returns 400 if not found or expired
+- [x] Deletes `state` key immediately (one-time use guarantee)
+- [x] Calls `oauthProvider.ExchangeAndVerify(ctx, code, verifier)` — exchanges code, parses id_token, verifies `iss` and `aud`
+- [x] Google tokens discarded after claim extraction; Pillow issues its own RS256 pair
+- [x] Account linking logic implemented in `authService.OAuthLogin`:
+  - Existing (provider, provider_id) → returning user, issues token pair
+  - Unknown provider_id, email exists, no prior Google link → links identity, issues token pair
+  - Unknown provider_id, email exists, different Google sub already linked → `409 Conflict`
+  - Unknown provider_id, new email → creates user + identity, issues token pair
+- [x] Logs `oauth_login`, `oauth_link`, or `oauth_register` audit event accordingly
+- [x] Sets `refresh_token` httpOnly cookie, returns `AuthResponse`
+- [x] Registered `GET /auth/google/callback` in `internal/app/router.go`
+- [x] Added both OAuth endpoints to `docs/api/openapi.yaml`
 
 ---
 
@@ -283,14 +230,14 @@ WHERE expires_at < NOW()
 
 **Design reference:** AuthDesign.md §5.5
 
-- [ ] Add `LogoutAll(ctx context.Context, userID string, activeJTI string, activeJTITTL time.Duration) error` to `domain.AuthService`
-- [ ] Implement in `internal/auth/service.go`:
-  - Call `repo.RevokeAllUserRefreshTokens(ctx, userID)` — sets `revoked_at` on all non-revoked rows in Postgres
-  - Call `repo.BlocklistToken(ctx, activeJTI, activeJTITTL)` — blocklist the caller's current access token
-  - Log `logout_all` audit event with `metadata: {sessions_revoked: N}`
-- [ ] Add `LogoutAll(c *fiber.Ctx) error` handler in `internal/auth/handler.go` (requires `RequireAuth` middleware)
-- [ ] Register `POST /auth/logout-all` in `internal/app/router.go` (protected)
-- [ ] Add endpoint to `docs/api/openapi.yaml`
+- [x] Added `LogoutAll(ctx context.Context, input domain.LogoutAllInput) error` to `domain.AuthService` (`LogoutAllInput` carries `UserID`, `ActiveTokenJTI`, `ActiveTokenTTL`)
+- [x] Implemented in `internal/auth/service.go`:
+  - Calls `repo.RevokeAllUserRefreshTokens(ctx, userID)` — sets `revoked_at` on all non-revoked rows in Postgres, returns affected count
+  - Calls `repo.BlocklistToken(ctx, activeJTI, activeJTITTL)` — blocklists the caller's current access token
+  - Logs `logout_all` audit event with `metadata: {sessions_revoked: N}`
+- [x] Added `LogoutAll(c *fiber.Ctx) error` handler in `internal/auth/handler.go` (requires `RequireAuth` middleware, clears refresh cookie)
+- [x] Registered `POST /auth/logout-all` in `internal/app/router.go` (protected)
+- [x] Added endpoint to `docs/api/openapi.yaml`
 
 ---
 
@@ -300,7 +247,7 @@ WHERE expires_at < NOW()
 
 **Design reference:** AuthDesign.md §9 (event type `password_change`)
 
-- [ ] Add `ChangePassword(ctx context.Context, input ChangePasswordInput) error` to `domain.AuthService`
+- [x] Added `ChangePassword(ctx context.Context, input ChangePasswordInput) error` to `domain.AuthService`
   ```go
   type ChangePasswordInput struct {
       UserID      string
@@ -308,24 +255,24 @@ WHERE expires_at < NOW()
       NewPassword string
   }
   ```
-- [ ] Implement in `internal/auth/service.go`:
-  - Fetch credential by `userID`
-  - `bcrypt.Compare(oldPassword, hash)` — return 401 if wrong
-  - `bcrypt.Generate(newPassword, 12)` — hash new password
-  - Update credential row
-  - Log `password_change` audit event
-  - **Do not revoke existing sessions** — password change is not logout; let the user decide if they want `logout-all`
-- [ ] Add `ChangePassword(c *fiber.Ctx) error` handler in `internal/auth/handler.go` (requires `RequireAuth`)
-- [ ] Add `ChangePasswordRequest` DTO to `internal/auth/dto.go`:
+- [x] Implemented in `internal/auth/service.go`:
+  - Fetches credential by `userID`
+  - `bcrypt.CompareHashAndPassword(oldPassword, hash)` — returns 401 if wrong
+  - `bcrypt.GenerateFromPassword(newPassword, 12)` — hashes new password
+  - Updates credential row via `repo.UpdateCredentialPassword`
+  - Logs `password_change` audit event
+  - **Does not revoke existing sessions** — password change is not logout; the user decides whether to call `logout-all`
+- [x] Added `ChangePassword(c *fiber.Ctx) error` handler in `internal/auth/handler.go` (requires `RequireAuth`)
+- [x] Added `ChangePasswordRequest` DTO to `internal/auth/dto.go`:
   ```go
   type ChangePasswordRequest struct {
       OldPassword string `json:"old_password" validate:"required"`
       NewPassword string `json:"new_password" validate:"required,min=8"`
   }
   ```
-- [ ] Add migration: no schema change needed — the `credentials` table already has `updated_at`
-- [ ] Register `POST /auth/password` in `internal/app/router.go` (protected)
-- [ ] Add endpoint to `docs/api/openapi.yaml`
+- [x] Migration: no schema change needed — the `credentials` table already has `updated_at`
+- [x] Registered `POST /auth/password` in `internal/app/router.go` (protected)
+- [x] Added endpoint to `docs/api/openapi.yaml`
 
 ---
 
@@ -341,19 +288,20 @@ File: `internal/auth/service_test.go`
 
 - [x] `TestRegister` — success, duplicate email
 - [x] `TestLogin` — unknown email, wrong password
-- [x] `TestLogout` — blocklists access token
-- [ ] `TestLogin_Success` — valid credentials return token pair
-- [ ] `TestRefresh_Success` — cache hit, rotates token pair
-- [ ] `TestRefresh_CacheMiss_PostgresFallback` — Redis miss, Postgres hit, succeeds
-- [ ] `TestRefresh_TheftDetected` — rotated token replayed → family revoked, 401 returned
-- [ ] `TestRefresh_FingerprintMismatch` — mismatched fingerprint → audit event logged, not blocked
-- [ ] `TestLogoutAll` — all tokens revoked, active JTI blocklisted
-- [ ] `TestChangePassword_Success`
-- [ ] `TestChangePassword_WrongOldPassword`
-- [ ] `TestOAuthLogin_NewUser` — no existing account → creates user + identity
-- [ ] `TestOAuthLogin_ExistingUser_SameProvider` — existing identity → loads user, issues tokens
-- [ ] `TestOAuthLogin_ExistingUser_EmailMatch` — email match, new provider → links identity
-- [ ] `TestOAuthLogin_Conflict` — email linked to different provider_id → 409
+- [x] `TestLogout` — blocklists access token (`TestLogout_BlocklistsAccessToken`, `TestLogout_RevokesRefreshToken`)
+- [x] `TestLogin_Success` — valid credentials return token pair
+- [x] `TestRefresh_Success` — cache hit, rotates token pair
+- [x] `TestRefresh_CacheMiss_PostgresFallback` — Redis miss, Postgres hit, succeeds
+- [x] `TestRefresh_TheftDetected` — rotated token replayed → family revoked, 401 returned
+- [x] `TestRefresh_FingerprintMismatch` — mismatched fingerprint → audit event logged, not blocked
+- [x] `TestLogoutAll` — all tokens revoked, active JTI blocklisted (`TestLogoutAll_RevokesSessionsAndBlocklistsToken`)
+- [x] `TestChangePassword_Success`
+- [x] `TestChangePassword_WrongOldPassword`
+- [x] `TestOAuthLogin_NewUser` — no existing account → creates user + identity
+- [x] `TestOAuthLogin_ExistingUser_SameProvider` — existing identity → loads user, issues tokens (`TestOAuthLogin_ReturningUser`)
+- [x] `TestOAuthLogin_ExistingUser_EmailMatch` — email match, new provider → links identity (`TestOAuthLogin_ExistingEmailLinksIdentity`)
+- [x] `TestOAuthLogin_Conflict` — email linked to different provider_id → 409 (`TestOAuthLogin_ConflictWhenEmailLinkedToDifferentAccount`)
+- [x] Service-layer statement coverage at 90.5% (≥ 90% target per `Folder-structure-rules.md §F4`); error-path tests added for store/issuer/blocklist failures
 
 ---
 
@@ -363,16 +311,17 @@ File: `internal/auth/handler_test.go`
 
 Use `net/http/httptest` + Fiber's `app.Test()` method. Inject a `mockAuthService`.
 
-- [ ] `TestRegisterHandler_Success` — 201, access token in body, Set-Cookie header present
-- [ ] `TestRegisterHandler_InvalidBody` — 400 on malformed JSON
-- [ ] `TestRegisterHandler_ValidationError` — 422 on missing required field
-- [ ] `TestRegisterHandler_ConflictError` — 409 propagated from service
-- [ ] `TestLoginHandler_Success` — 200, token pair returned
-- [ ] `TestLoginHandler_Unauthorized` — 401 propagated
-- [ ] `TestRefreshHandler_MissingCookie` — 401 when cookie absent
-- [ ] `TestRefreshHandler_Success` — 200, new cookie set
-- [ ] `TestLogoutHandler_MissingAuth` — 401 when no Bearer header
-- [ ] `TestLogoutHandler_Success` — 204, cookie cleared
+- [x] `TestRegisterHandler_Success` — 201, access token in body, Set-Cookie header present
+- [x] `TestRegisterHandler_InvalidBody` — 400 on malformed JSON
+- [x] `TestRegisterHandler_ValidationError` — 422 on missing required field
+- [x] `TestRegisterHandler_ConflictError` — 409 propagated from service
+- [x] `TestLoginHandler_Success` — 200, token pair returned
+- [x] `TestLoginHandler_Unauthorized` — 401 propagated
+- [x] `TestRefreshHandler_MissingCookie` — 401 when cookie absent
+- [x] `TestRefreshHandler_Success` — 200, new cookie set
+- [x] `TestLogoutHandler_MissingAuth` — 401 when no Bearer header
+- [x] `TestLogoutHandler_Success` — 204, cookie cleared
+- [x] Also covered: logout-all, password-change, and both OAuth handlers (Handler coverage 84.3%, ≥ 70% target)
 
 ---
 
@@ -380,16 +329,16 @@ Use `net/http/httptest` + Fiber's `app.Test()` method. Inject a `mockAuthService
 
 File: `internal/middleware/auth_test.go`
 
-- [ ] `TestRequireAuth_ValidToken` — injects claims into context
-- [ ] `TestRequireAuth_MissingHeader` — returns 401
-- [ ] `TestRequireAuth_ExpiredToken` — returns 401
-- [ ] `TestRequireAuth_BlocklistedToken` — returns 401
+- [x] `TestRequireAuth_ValidToken` — injects claims into context
+- [x] `TestRequireAuth_MissingHeader` — returns 401
+- [x] `TestRequireAuth_ExpiredToken` — returns 401
+- [x] `TestRequireAuth_BlocklistedToken` — returns 401
 
 File: `internal/middleware/ratelimit_test.go`
 
-- [ ] `TestLimitByIP_Allow` — under limit, passes through
-- [ ] `TestLimitByIP_Block` — at limit, returns 429 with `Retry-After`
-- [ ] `TestLimitByEmail_EmailHashed` — verifies email is SHA-256 hashed in Redis key (PII protection)
+- [x] `TestLimitByIP_Allow` — under limit, passes through (`TestLimitByIP_AllowsUnderLimit`)
+- [x] `TestLimitByIP_Block` — at limit, returns 429 with `Retry-After` (`TestLimitByIP_BlocksAtLimit`)
+- [x] `TestLimitByEmail_EmailHashed` — verifies email is SHA-256 hashed in Redis key (PII protection) (`TestLimitByEmail_EmailIsHashed`)
 
 ---
 
@@ -399,14 +348,16 @@ Directory: `test/integration/`
 
 Use `testcontainers-go` to spin up real Postgres and Redis.
 
-- [ ] Add `testcontainers-go` to `go.mod`
-- [ ] Create `test/testhelpers/containers.go`:
-  - `NewPostgresContainer(t, ctx) (*gorm.DB, func())` — starts container, runs migrations, returns db + cleanup func
+> Integration tests are gated behind the `integration` build tag (`//go:build integration`) so the default `go test ./...` stays green without Docker. Run them with `go test -tags=integration ./test/integration/...` on a host with Docker.
+
+- [x] Added `testcontainers-go` (+ postgres/redis modules) to `go.mod` (pinned `moby/go-archive v0.1.0` to resolve a Docker archive build conflict)
+- [x] Created `test/testhelpers/containers.go`:
+  - `NewPostgresContainer(t, ctx) (*gorm.DB, func())` — starts container, runs the versioned SQL migrations via `golang-migrate`, returns db + cleanup func
   - `NewRedisContainer(t, ctx) (*redis.Client, func())` — starts container, returns client + cleanup func
-- [ ] `test/integration/auth_register_test.go` — full round trip through real Postgres
-- [ ] `test/integration/auth_login_test.go` — login with real bcrypt + real Redis blocklist
-- [ ] `test/integration/auth_refresh_test.go` — rotation against real Postgres + Redis; theft detection path
-- [ ] `test/integration/auth_oauth_test.go` — stub Google's token endpoint using `httptest.NewServer`; verify full PKCE flow
+- [x] `test/integration/auth_register_test.go` — full round trip through real Postgres (user + credential persisted, bcrypt verifies, duplicate rejected)
+- [x] `test/integration/auth_login_test.go` — login with real bcrypt + real Redis blocklist (logout blocklists the jti)
+- [x] `test/integration/auth_refresh_test.go` — rotation against real Postgres + Redis; theft detection revokes the family
+- [x] `test/integration/auth_oauth_test.go` — PKCE store round-trip in real Redis, OAuthLogin account-linking in real Postgres, and a stubbed Google token endpoint (`httptest.NewServer`) verifying the PKCE `code_verifier` round-trips
 
 ---
 
@@ -420,9 +371,9 @@ Use `testcontainers-go` to spin up real Postgres and Redis.
 
 The current Fiber logger middleware logs basic request info. Add a custom logger that outputs the fields the design requires.
 
-- [ ] Replace `logger.New()` with a custom Fiber middleware in `internal/middleware/requestlog.go` that emits `slog` JSON with: `trace_id` (UUID, generated per request), `user_id` (from claims if authenticated), `endpoint`, `method`, `status`, `latency_ms`, `ip` (redacted to /24 prefix in production)
-- [ ] Inject `trace_id` into `fiber.Ctx` locals at the top of the middleware chain so downstream handlers can attach it to log lines
-- [ ] Never log: raw tokens, passwords, full email addresses in production (log SHA-256 of email for correlation)
+- [x] Replaced `logger.New()` with `middleware.RequestLogger` in `internal/middleware/requestlog.go` that emits `slog` JSON with: `trace_id` (UUID, generated per request), `user_id` (from claims if authenticated), `endpoint`, `method`, `status`, `latency_ms`, `ip` (redacted to /24 prefix when `APP_ENV=production`); wired in `internal/app/app.go`
+- [x] Injects `trace_id` into `fiber.Ctx` locals (`middleware.TraceIDLocalsKey`) at the top of the middleware chain
+- [x] Never logs raw tokens, passwords, or full emails — emails are logged as SHA-256 (`email_hash`) for correlation; covered by `requestlog_test.go`
 
 ---
 
@@ -430,13 +381,13 @@ The current Fiber logger middleware logs basic request info. Add a custom logger
 
 The spec in `docs/api/openapi.yaml` must be updated as each endpoint above ships.
 
-- [ ] Add `POST /auth/logout-all` (Phase 4.1)
-- [ ] Add `POST /auth/password` (Phase 4.2)
-- [ ] Add `GET /auth/google` (Phase 3.2)
-- [ ] Add `GET /auth/google/callback` (Phase 3.3)
-- [ ] Add `GET /.well-known/jwks.json` with `JWKSet` schema (Phase 2.1)
-- [ ] Add `429` responses with `Retry-After` header to all rate-limited endpoints (Phase 1.1)
-- [ ] Add `503` to `/health/ready` (Phase 1.3)
+- [x] Add `POST /auth/logout-all` (Phase 4.1)
+- [x] Add `POST /auth/password` (Phase 4.2)
+- [x] Add `GET /auth/google` (Phase 3.2)
+- [x] Add `GET /auth/google/callback` (Phase 3.3)
+- [x] Add `GET /.well-known/jwks.json` with `JWKSet` schema (Phase 2.1)
+- [x] Add `429` responses with `Retry-After` header to all rate-limited endpoints (Phase 1.1) — register, login, refresh, google
+- [x] Add `503` to `/health/ready` (Phase 1.3)
 
 ---
 
@@ -467,12 +418,12 @@ Phase 6 (Observability — last because it wraps everything)
 
 The following must all be `[x]` before the auth system handles real user traffic:
 
-- [ ] Rate limiting on all sensitive endpoints (Phase 1.1)
-- [ ] Real readiness probe (Phase 1.3)
-- [ ] JWKS endpoint (Phase 2.1)
-- [ ] Graceful shutdown (Phase 2.2)
-- [ ] Google OAuth PKCE (Phase 3 — if OAuth is in scope for launch)
-- [ ] Logout all devices (Phase 4.1)
-- [ ] Service test coverage ≥ 90% (Phase 5.1 + 5.2)
-- [ ] At least one integration test per auth flow (Phase 5.4)
-- [ ] No passwords, tokens, or raw emails in any log line (Phase 6.1)
+- [x] Rate limiting on all sensitive endpoints (Phase 1.1)
+- [x] Real readiness probe (Phase 1.3)
+- [x] JWKS endpoint (Phase 2.1)
+- [x] Graceful shutdown (Phase 2.2)
+- [x] Google OAuth PKCE (Phase 3 — if OAuth is in scope for launch)
+- [x] Logout all devices (Phase 4.1)
+- [x] Service test coverage ≥ 90% (Phase 5.1 + 5.2) — service.go 90.5%, handler.go 84.3%, middleware 93.9%
+- [x] At least one integration test per auth flow (Phase 5.4) — register, login, refresh, oauth (run with `-tags=integration`)
+- [x] No passwords, tokens, or raw emails in any log line (Phase 6.1)

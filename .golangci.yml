@@ -1,0 +1,48 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+    - errcheck
+  settings:
+    depguard:
+      rules:
+        domain-purity:
+          files:
+            - "**/internal/domain/*.go"
+          allow:
+            - "$gostd"
+        service-no-infrastructure:
+          files:
+            - "**/internal/*/service.go"
+          deny:
+            - pkg: "gorm.io/gorm"
+              desc: "service layer must not import GORM directly (Rule C2)"
+            - pkg: "github.com/redis/go-redis/v9"
+              desc: "service layer must not import Redis directly (Rule C2)"
+            - pkg: "github.com/gofiber/fiber/v2"
+              desc: "service layer is transport-agnostic (Rule C2)"
+        handler-no-infrastructure:
+          files:
+            - "**/internal/*/handler.go"
+          deny:
+            - pkg: "gorm.io/gorm"
+              desc: "handler must not import GORM directly (Rule C1)"
+            - pkg: "github.com/redis/go-redis/v9"
+              desc: "handler must not import Redis directly (Rule C1)"
+        kyc-no-cross-domain:
+          files:
+            - "**/internal/kyc/*.go"
+          deny:
+            - pkg: "github.com/kodiahbertrand/pillow/internal/auth"
+              desc: "domains must not import each other directly (Rule A3)"
+            - pkg: "github.com/kodiahbertrand/pillow/internal/user"
+              desc: "domains must not import each other directly (Rule A3)"
+            - pkg: "github.com/kodiahbertrand/pillow/internal/property"
+              desc: "domains must not import each other directly (Rule A3)"
+        infrastructure-no-inward:
+          files:
+            - "**/internal/infrastructure/**"
+          deny:
+            - pkg: "github.com/gofiber/fiber/v2"
+              desc: "infrastructure must not import the transport layer (Rule C5)"

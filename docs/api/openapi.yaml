@@ -30,6 +30,8 @@ servers:
 tags:
   - name: auth
     description: Identity, sessions, and token lifecycle
+  - name: discovery
+    description: Standard well-known endpoints for token verification and service discovery
   - name: health
     description: Liveness and readiness probes
 
@@ -38,6 +40,44 @@ tags:
 # ---------------------------------------------------------------------------
 
 paths:
+
+  # --- Discovery ------------------------------------------------------------
+
+  /.well-known/jwks.json:
+    get:
+      tags: [discovery]
+      summary: JSON Web Key Set
+      description: |
+        Returns the RSA public keys used to verify Pillow access tokens (RS256).
+
+        Downstream services should cache this response for 5 minutes using the `Cache-Control` header.
+        Multiple keys are served simultaneously during key rotation windows — use the `kid` header claim
+        in the JWT to select the correct key.
+
+        This endpoint is public and requires no authentication.
+      operationId: wellKnownJwks
+      security: []
+      responses:
+        "200":
+          description: JWKS document
+          headers:
+            Cache-Control:
+              description: Instructs clients to cache for 5 minutes
+              schema:
+                type: string
+                example: "public, max-age=300"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JWKSet"
+              example:
+                keys:
+                  - kty: RSA
+                    use: sig
+                    alg: RS256
+                    kid: pillow-2026-q1
+                    n: "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw"
+                    e: AQAB
 
   # --- Health ---------------------------------------------------------------
 
@@ -106,6 +146,8 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimit"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -208,6 +250,141 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /auth/logout-all:
+    post:
+      tags: [auth]
+      summary: Logout all devices
+      description: |
+        Revokes every active refresh token for the authenticated user across all devices and sessions.
+        The caller's current access token is also blocklisted for the remainder of its TTL.
+
+        Use this after a suspected account compromise or when the user explicitly requests to sign out everywhere.
+
+        **Note:** This does not invalidate other users' access tokens that have already been issued and haven't expired — those will expire naturally within 15 minutes.
+      operationId: authLogoutAll
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: All sessions revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/password:
+    post:
+      tags: [auth]
+      summary: Change password
+      description: |
+        Updates the authenticated user's password. Requires the current password for verification.
+
+        **Sessions are not revoked** — existing refresh tokens remain valid after a password change.
+        Call `POST /auth/logout-all` after this endpoint if the intent is to force re-authentication on all devices.
+
+        The audit log records a `password_change` event.
+      operationId: authChangePassword
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+            examples:
+              success:
+                value:
+                  old_password: "hunter2secure!"
+                  new_password: "even-better-passphrase-42"
+      responses:
+        "204":
+          description: Password updated successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/google:
+    get:
+      tags: [auth]
+      summary: Initiate Google OAuth 2.0 with PKCE
+      description: |
+        Generates a cryptographically random `state` and PKCE `code_verifier`, stores the verifier in Redis (10-minute TTL),
+        derives the `code_challenge` (SHA-256 / base64url), then redirects the user to Google's consent screen.
+
+        The PKCE flow (RFC 7636 S256) prevents authorization code interception attacks. The `state` parameter provides CSRF protection.
+
+        This endpoint is rate-limited to 20 requests per IP per 60 seconds.
+      operationId: authGoogleInitiate
+      security: []
+      responses:
+        "302":
+          description: Redirect to Google consent screen
+          headers:
+            Location:
+              description: Google OAuth authorization URL
+              schema:
+                type: string
+                format: uri
+        "429":
+          $ref: "#/components/responses/RateLimit"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/google/callback:
+    get:
+      tags: [auth]
+      summary: Handle Google OAuth 2.0 callback
+      description: |
+        Receives the authorization `code` and `state` from Google, looks up the stored PKCE verifier, exchanges
+        the code for tokens, and verifies the `id_token` (checks `iss` and `aud`).
+
+        **Account linking logic:**
+        1. Existing Google identity found → issue Pillow token pair for linked user.
+        2. Google identity not found, email matches existing account → link new identity, issue token pair.
+        3. Google identity not found, no account with this email → create new user and identity, issue token pair.
+        4. Email matches an account already linked to a **different** Google identity → `409 Conflict`.
+
+        Google tokens are discarded after verification. Pillow issues its own RS256 token pair.
+      operationId: authGoogleCallback
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          description: Authorization code from Google
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          description: CSRF state token generated during initiation
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Authenticated successfully
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/RefreshTokenCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 # ---------------------------------------------------------------------------
 # COMPONENTS
 # ---------------------------------------------------------------------------
@@ -249,6 +426,60 @@ components:
   # --- Request schemas ------------------------------------------------------
 
   schemas:
+
+    JWK:
+      type: object
+      required: [kty, use, alg, kid, n, e]
+      description: A single RSA public key in JSON Web Key format (RFC 7517).
+      properties:
+        kty:
+          type: string
+          example: RSA
+          description: Key type — always `RSA` for Pillow tokens.
+        use:
+          type: string
+          example: sig
+          description: Intended use — always `sig` (signature verification).
+        alg:
+          type: string
+          example: RS256
+          description: Algorithm — always `RS256`.
+        kid:
+          type: string
+          example: pillow-2026-q1
+          description: Key ID. Matches the `kid` header claim in Pillow JWTs. Use this to select the correct key when multiple are present during key rotation.
+        n:
+          type: string
+          description: Base64url-encoded RSA public key modulus (big-endian byte array).
+          example: "0vx7agoebGcQSuuPiLJXZptN9nn..."
+        e:
+          type: string
+          description: Base64url-encoded RSA public key exponent.
+          example: AQAB
+
+    JWKSet:
+      type: object
+      required: [keys]
+      description: A set of JSON Web Keys. Contains one key per active signing key. Multiple keys are present simultaneously during 15-minute key rotation windows.
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/JWK"
+
+    ChangePasswordRequest:
+      type: object
+      required: [old_password, new_password]
+      properties:
+        old_password:
+          type: string
+          format: password
+          description: The user's current password for verification.
+        new_password:
+          type: string
+          format: password
+          minLength: 8
+          description: The new password. Minimum 8 characters.
 
     RegisterRequest:
       type: object
