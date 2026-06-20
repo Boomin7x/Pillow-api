@@ -120,16 +120,34 @@ func (r *authRepository) RevokeRefreshTokenByHash(ctx context.Context, hash stri
 }
 
 func (r *authRepository) RevokeTokenFamily(ctx context.Context, familyID string) error {
+	var hashes []string
+	if err := r.db.WithContext(ctx).Model(&pgmodels.RefreshTokenModel{}).
+		Where("family_id = ?", familyID).
+		Pluck("token_hash", &hashes).Error; err != nil {
+		return fmt.Errorf("auth: load token family hashes: %w", err)
+	}
+
 	now := time.Now()
 	if err := r.db.WithContext(ctx).Model(&pgmodels.RefreshTokenModel{}).
 		Where("family_id = ? AND revoked_at IS NULL", familyID).
 		Update("revoked_at", now).Error; err != nil {
 		return fmt.Errorf("auth: revoke token family: %w", err)
 	}
+
+	if err := r.evictCachedRefreshTokens(ctx, hashes); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (r *authRepository) RevokeAllUserRefreshTokens(ctx context.Context, userID string) (int64, error) {
+	var hashes []string
+	if err := r.db.WithContext(ctx).Model(&pgmodels.RefreshTokenModel{}).
+		Where("user_id = ?", userID).
+		Pluck("token_hash", &hashes).Error; err != nil {
+		return 0, fmt.Errorf("auth: load user token hashes: %w", err)
+	}
+
 	now := time.Now()
 	result := r.db.WithContext(ctx).Model(&pgmodels.RefreshTokenModel{}).
 		Where("user_id = ? AND revoked_at IS NULL", userID).
@@ -137,7 +155,25 @@ func (r *authRepository) RevokeAllUserRefreshTokens(ctx context.Context, userID 
 	if result.Error != nil {
 		return 0, fmt.Errorf("auth: revoke all user refresh tokens: %w", result.Error)
 	}
+
+	if err := r.evictCachedRefreshTokens(ctx, hashes); err != nil {
+		return 0, err
+	}
 	return result.RowsAffected, nil
+}
+
+func (r *authRepository) evictCachedRefreshTokens(ctx context.Context, hashes []string) error {
+	if len(hashes) == 0 {
+		return nil
+	}
+	keys := make([]string, len(hashes))
+	for i, h := range hashes {
+		keys[i] = refreshKey(h)
+	}
+	if err := r.redis.Del(ctx, keys...).Err(); err != nil {
+		return fmt.Errorf("auth: evict cached refresh tokens: %w", err)
+	}
+	return nil
 }
 
 func (r *authRepository) UpdateCredentialPassword(ctx context.Context, userID, passwordHash string) error {

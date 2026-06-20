@@ -36,6 +36,8 @@ type vaultUnderTest struct {
 		Store(ctx context.Context, upload domain.DocumentUpload) (domain.DocumentReference, error)
 		SignedURL(ctx context.Context, reference domain.DocumentReference, ttl time.Duration) (string, error)
 		Purge(ctx context.Context, reference domain.DocumentReference) error
+		PurgeExpired(ctx context.Context) (int, error)
+		PurgeUser(ctx context.Context, userID string) (int, error)
 	}
 }
 
@@ -52,7 +54,7 @@ func TestVault_StoreEncryptsAtRest(t *testing.T) {
 		t.Fatalf("store: %v", err)
 	}
 
-	stored, err := os.ReadFile(filepath.Join(basePath, string(ref)))
+	stored, err := os.ReadFile(filepath.Join(basePath, "user-1", string(ref)))
 	if err != nil {
 		t.Fatalf("read stored file: %v", err)
 	}
@@ -81,7 +83,7 @@ func TestVault_SignedURLContainsSignatureAndExpiry(t *testing.T) {
 
 func TestVault_PurgeRemovesDocumentAndIsIdempotent(t *testing.T) {
 	vault, basePath := newVault(t)
-	ref, err := vault.v.Store(context.Background(), domain.DocumentUpload{Content: []byte("x")})
+	ref, err := vault.v.Store(context.Background(), domain.DocumentUpload{UserID: "u1", Content: []byte("x")})
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -89,7 +91,7 @@ func TestVault_PurgeRemovesDocumentAndIsIdempotent(t *testing.T) {
 	if err := vault.v.Purge(context.Background(), ref); err != nil {
 		t.Fatalf("first purge: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(basePath, string(ref))); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(basePath, "u1", string(ref))); !os.IsNotExist(err) {
 		t.Errorf("document still present after purge: %v", err)
 	}
 	if err := vault.v.Purge(context.Background(), ref); err != nil {

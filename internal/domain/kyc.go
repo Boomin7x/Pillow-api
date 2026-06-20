@@ -205,6 +205,7 @@ type KYCProfile struct {
 	Tier           Tier
 	Status         VerificationStatus
 	Qualifications []Qualification
+	DeletedAt      *time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
@@ -274,6 +275,7 @@ const (
 )
 
 var ErrIllegalTransition = errors.New("kyc: illegal verification status transition")
+var ErrInvalidWebhookSignature = errors.New("kyc: invalid webhook signature")
 
 func NextStatus(current VerificationStatus, event TransitionEvent) (VerificationStatus, error) {
 	switch {
@@ -313,6 +315,7 @@ type Check struct {
 	ProviderEventID string
 	RiskScore       RiskScore
 	RawPayload      map[string]any
+	ExpiresAt       *time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
@@ -427,6 +430,13 @@ type SubmitDocumentInput struct {
 	DocumentReference DocumentReference
 }
 
+type UploadDocumentInput struct {
+	UserID      string
+	CaseID      string
+	ContentType string
+	Content     []byte
+}
+
 type VerdictResult struct {
 	ProviderEventID string
 	CaseID          string
@@ -451,6 +461,7 @@ type SubmitLicenseInput struct {
 
 type StartBusinessVerificationInput struct {
 	UserID             string
+	Role               Role
 	BusinessName       string
 	RegistrationNumber string
 }
@@ -459,19 +470,24 @@ type KYCRepository interface {
 	CreateProfile(ctx context.Context, profile *KYCProfile) error
 	FindProfileByUserID(ctx context.Context, userID string) (*KYCProfile, error)
 	UpdateProfile(ctx context.Context, profile *KYCProfile) error
+	TombstoneProfile(ctx context.Context, userID string) error
 
 	CreateCase(ctx context.Context, verificationCase *VerificationCase) error
 	FindCaseByID(ctx context.Context, id string) (*VerificationCase, error)
 	UpdateCase(ctx context.Context, verificationCase *VerificationCase) error
 	ListPendingCases(ctx context.Context, limit int) ([]VerificationCase, error)
+	ListCasesStuckInReview(ctx context.Context, olderThan time.Time, limit int) ([]VerificationCase, error)
 
 	CreateCheck(ctx context.Context, check *Check) error
 	FindCheckByProviderEventID(ctx context.Context, providerEventID string) (*Check, error)
 	UpdateCheck(ctx context.Context, check *Check) error
+	ListChecksExpiringBefore(ctx context.Context, t time.Time, limit int) ([]Check, error)
 
 	CreateOwnershipClaim(ctx context.Context, claim *OwnershipClaim) error
 	FindOwnershipClaimByID(ctx context.Context, id string) (*OwnershipClaim, error)
 	UpdateOwnershipClaim(ctx context.Context, claim *OwnershipClaim) error
+
+	ListProfilesForRescreen(ctx context.Context, minTier Tier, limit int, cursor string) ([]KYCProfile, error)
 }
 
 type AuditRepository interface {
@@ -484,11 +500,13 @@ type KYCService interface {
 	EvaluateAccess(ctx context.Context, userID string, action Action) (*AccessDecision, error)
 	StartVerification(ctx context.Context, input StartVerificationInput) (*VerificationCase, error)
 	SubmitDocument(ctx context.Context, input SubmitDocumentInput) error
+	UploadDocument(ctx context.Context, input UploadDocumentInput) (*VerificationCase, error)
 	GetCase(ctx context.Context, userID, caseID string) (*VerificationCase, error)
 	ApplyVerdict(ctx context.Context, result VerdictResult) error
 	StartOwnershipClaim(ctx context.Context, input StartOwnershipClaimInput) (*OwnershipClaim, error)
 	SubmitLicense(ctx context.Context, input SubmitLicenseInput) (*VerificationCase, error)
 	StartBusinessVerification(ctx context.Context, input StartBusinessVerificationInput) (*VerificationCase, error)
+	DeleteProfile(ctx context.Context, userID string) error
 }
 
 type IdentityVerifier interface {
@@ -516,4 +534,47 @@ type DocumentVault interface {
 	Store(ctx context.Context, upload DocumentUpload) (DocumentReference, error)
 	SignedURL(ctx context.Context, reference DocumentReference, ttl time.Duration) (string, error)
 	Purge(ctx context.Context, reference DocumentReference) error
+	PurgeExpired(ctx context.Context) (int, error)
+	PurgeUser(ctx context.Context, userID string) (int, error)
+}
+
+type TierCache interface {
+	Get(ctx context.Context, userID string) (*KYCProfile, error)
+	Set(ctx context.Context, userID string, profile *KYCProfile, ttl time.Duration) error
+	Del(ctx context.Context, userID string) error
+}
+
+type WebhookVerifier interface {
+	Verify(payload []byte, signature string) error
+}
+
+type Notification struct {
+	UserID    string
+	EventType string
+	CaseID    string
+	Status    VerificationStatus
+}
+
+type Notifier interface {
+	Notify(ctx context.Context, n Notification) error
+}
+
+type VerificationJob struct {
+	CaseID             string
+	ClaimID            string
+	UserID             string
+	Type               CheckType
+	LicenseNumber      string
+	Jurisdiction       string
+	BusinessName       string
+	RegistrationNumber string
+	PropertyAddress    string
+	ClaimantName       string
+	DocumentReference  DocumentReference
+}
+
+type VerificationQueue interface {
+	Enqueue(ctx context.Context, job VerificationJob) error
+	Dequeue(ctx context.Context, timeout time.Duration) (*VerificationJob, error)
+	Len(ctx context.Context) (int, error)
 }

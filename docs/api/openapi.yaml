@@ -30,6 +30,8 @@ servers:
 tags:
   - name: auth
     description: Identity, sessions, and token lifecycle
+  - name: kyc
+    description: Know Your Customer — identity verification, tier gating, and progressive escalation
   - name: discovery
     description: Standard well-known endpoints for token verification and service discovery
   - name: health
@@ -385,6 +387,404 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- KYC ------------------------------------------------------------------
+
+  /kyc/profile:
+    get:
+      tags: [kyc]
+      summary: Get KYC profile and optional action access decision
+      description: |
+        Returns the authenticated user's current KYC tier, role, status, and qualifications.
+        If an `action` query parameter is provided, also returns the access decision
+        (satisfied/insufficient tier/missing qualifications) for that action.
+
+        Use this endpoint to determine what the user can do and what they still need to complete.
+      operationId: kycGetProfile
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: action
+          in: query
+          required: false
+          description: Optional action to evaluate access for
+          schema:
+            type: string
+            example: make_offer
+      responses:
+        "200":
+          description: Profile and optional access decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KYCProfileResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      tags: [kyc]
+      summary: Delete KYC profile (GDPR / CCPA erasure)
+      description: |
+        Permanently deletes the authenticated user's uploaded documents from the vault
+        and tombstones their KYC profile. The profile row is soft-deleted (deleted_at set)
+        so it remains available for compliance/forensics but is excluded from normal queries.
+
+        Returns 204 on success. If the profile is already deleted, returns 404.
+      operationId: kycDeleteProfile
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Profile deleted successfully (no content)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Profile not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /kyc/verifications:
+    post:
+      tags: [kyc]
+      summary: Start a new verification case
+      description: |
+        Creates a new verification case for the authenticated user. The `type` field
+        determines what is being verified (document, liveness, sanctions, payout_aml).
+
+        Risk signals (device fingerprint, IP, geo) are derived server-side from the
+        request transport — they are never accepted from the request body — and are
+        evaluated to determine whether step-up verification is needed.
+
+        On success, the user polls `GET /kyc/verifications/{id}` for the case status.
+        Provider checks may complete synchronously (immediate verdict) or asynchronously
+        (webhook-delivered verdict). This endpoint is rate-limited per IP.
+      operationId: kycStartVerification
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartVerificationRequest"
+            examples:
+              document:
+                summary: Identity document verification
+                value:
+                  role: buyer
+                  type: document
+      responses:
+        "201":
+          description: Verification case created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerificationCaseResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /kyc/verifications/{id}:
+    get:
+      tags: [kyc]
+      summary: Get verification case status
+      description: |
+        Poll the status of a verification case. Returns the current case state
+        including the verification status (pending, in_review, verified, rejected).
+        Only the case owner can view the case.
+      operationId: kycGetCase
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Verification case UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Verification case details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerificationCaseResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /kyc/verifications/{id}/documents:
+    post:
+      tags: [kyc]
+      summary: Upload an identity document for verification
+      description: |
+        Uploads the raw identity-document file (multipart/form-data, field `document`)
+        for the case. The bytes are stored encrypted in the document vault — they never
+        touch Postgres — and the resulting reference is sent to the identity provider for
+        verification. The provider returns a verdict; if it is unreachable the case is
+        queued for manual review.
+
+        Accepted content types: `image/jpeg`, `image/png`, `application/pdf`.
+        Maximum size: 10 MiB. This endpoint is rate-limited per IP.
+
+        Returns `202 Accepted` with the case — verification may still be in review.
+      operationId: kycUploadDocument
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Verification case UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [document]
+              properties:
+                document:
+                  type: string
+                  format: binary
+                  description: The identity document file (JPEG, PNG, or PDF; max 10 MiB).
+      responses:
+        "202":
+          description: Document accepted; verification in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerificationCaseResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /kyc/ownership-claims:
+    post:
+      tags: [kyc]
+      summary: Start a property ownership claim
+      description: |
+        Initiates verified ownership of a property. Uses the ownership provider
+        to verify against public records first. If the public-record lookup fails
+        or returns inconclusive, the method auto-advances down the fallback ladder
+        (document → postcard → manual review).
+
+        Required for seller and landlord roles that need to list or rent property.
+      operationId: kycStartOwnershipClaim
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartOwnershipClaimRequest"
+            examples:
+              typical:
+                summary: Standard ownership claim
+                value:
+                  property_address: 123 Main St, Springfield, IL 62701
+                  claimant_name: Alice Wonderland
+      responses:
+        "202":
+          description: Ownership claim accepted for processing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnershipClaimResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /kyc/licenses:
+    post:
+      tags: [kyc]
+      summary: Submit a professional license for T3 verification
+      description: |
+        Submits an agent or lender license for regulation-compliant T3 verification.
+        The provider checks the license number against state/NMLS databases and verifies
+        it is active and not expired.
+
+        License verification is queued for async processing. The case is created in
+        `pending` status and will be processed asynchronously. A successful
+        verification upgrades the user's tier to T3_REGULATED and grants the license
+        qualification.
+      operationId: kycSubmitLicense
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitLicenseRequest"
+            examples:
+              agent:
+                summary: Real estate agent license
+                value:
+                  role: agent
+                  license_number: CA-01234567
+                  jurisdiction: CA
+      responses:
+        "202":
+          description: License verification accepted; case is pending processing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerificationCaseResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /kyc/business:
+    post:
+      tags: [kyc]
+      summary: Start business (KYB) verification for builder role
+      description: |
+        Initiates Know Your Business verification for builder accounts. The provider
+        checks the business registration, ultimate beneficial owners (UBO), and
+        entity sanctions.
+
+        A successful verification upgrades the user's tier to T3_REGULATED and
+        grants the KYB qualification.
+      operationId: kycStartBusinessVerification
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartBusinessVerificationRequest"
+            examples:
+              typical:
+                summary: Builder KYB
+                value:
+                  business_name: Acme Construction LLC
+                  registration_number: EIN-12-3456789
+      responses:
+        "202":
+          description: Business verification accepted; case is pending processing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerificationCaseResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Validation"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /kyc/webhooks/provider:
+    post:
+      tags: [kyc]
+      summary: Receive async verdict from identity verification provider
+      description: |
+        Inbound webhook called by the KYC provider when an async verification
+        decision is ready. Authentication is via HMAC-SHA256 of the raw request
+        body using the shared `KYC_WEBHOOK_SECRET`; the computed signature is
+        sent by the provider in the `X-KYC-Signature` header (hex-encoded).
+
+        The endpoint is **idempotent on `event_id`**: delivering the same event
+        twice produces exactly one state change (the second delivery is a no-op).
+        The response is always `200 OK` for a well-formed, correctly signed event
+        — including duplicates — so the provider stops retrying.
+
+        This endpoint does **not** require a bearer token (`security: []`).
+        It is rate-limited by IP to defend against retry storms.
+      operationId: kycHandleProviderWebhook
+      security: []
+      parameters:
+        - in: header
+          name: X-KYC-Signature
+          required: true
+          schema:
+            type: string
+          description: HMAC-SHA256 of the raw request body, hex-encoded, signed with KYC_WEBHOOK_SECRET.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderVerdictWebhook"
+            examples:
+              approved:
+                summary: Provider approved a document check
+                value:
+                  event_id: evt-abc-123
+                  case_id: case-uuid-here
+                  check_type: document
+                  verdict: approved
+                  risk_score: 5
+              rejected:
+                summary: Provider rejected a sanctions screen
+                value:
+                  event_id: evt-def-456
+                  case_id: case-uuid-here
+                  check_type: sanctions
+                  verdict: rejected
+                  risk_score: 90
+      responses:
+        "200":
+          description: Verdict accepted (or idempotent duplicate — no state change)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 # ---------------------------------------------------------------------------
 # COMPONENTS
 # ---------------------------------------------------------------------------
@@ -426,6 +826,211 @@ components:
   # --- Request schemas ------------------------------------------------------
 
   schemas:
+
+    KYCProfileResponse:
+      type: object
+      required: [user_id, role, tier, status, qualifications, created_at, updated_at]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: The authenticated user's UUID
+        role:
+          type: string
+          enum: [buyer, renter, seller, landlord, agent, lender, builder, service_pro]
+          example: buyer
+        tier:
+          type: string
+          enum: [T0_ANONYMOUS, T1_IDENTIFIED, T2_VERIFIED, T3_REGULATED]
+          example: T2_VERIFIED
+        status:
+          type: string
+          example: verified
+        qualifications:
+          type: array
+          items:
+            type: string
+          example: [ownership]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        action_decision:
+          allOf:
+            - $ref: "#/components/schemas/AccessDecisionResponse"
+          description: Present only when `action` query parameter was provided
+
+    StartVerificationRequest:
+      type: object
+      required: [role, type]
+      properties:
+        role:
+          type: string
+          enum: [buyer, renter, seller, landlord, agent, lender, builder, service_pro]
+          example: buyer
+        type:
+          type: string
+          enum: [document, liveness, sanctions, payout_aml]
+          example: document
+
+    StartOwnershipClaimRequest:
+      type: object
+      required: [property_address, claimant_name]
+      properties:
+        property_address:
+          type: string
+          description: Full property address for ownership verification
+          example: 123 Main St, Springfield, IL 62701
+        claimant_name:
+          type: string
+          description: Legal name of the claimant as it appears on the deed or public record
+          example: Alice Wonderland
+
+    SubmitLicenseRequest:
+      type: object
+      required: [role, license_number, jurisdiction]
+      properties:
+        role:
+          type: string
+          enum: [agent, lender]
+          example: agent
+        license_number:
+          type: string
+          description: Professional license or NMLS number
+          example: CA-01234567
+        jurisdiction:
+          type: string
+          description: Issuing state or jurisdiction
+          example: CA
+
+    StartBusinessVerificationRequest:
+      type: object
+      required: [business_name, registration_number]
+      properties:
+        business_name:
+          type: string
+          description: Registered legal business name
+          example: Acme Construction LLC
+        registration_number:
+          type: string
+          description: Business registration or EIN number
+          example: EIN-12-3456789
+
+    ProviderVerdictWebhook:
+      type: object
+      required: [event_id, case_id, check_type, verdict]
+      properties:
+        event_id:
+          type: string
+          description: Provider-assigned unique event identifier (used for idempotency).
+          example: evt-abc-123
+        case_id:
+          type: string
+          format: uuid
+          description: The Pillow verification case this verdict applies to.
+          example: 550e8400-e29b-41d4-a716-446655440000
+        check_type:
+          type: string
+          description: The type of check this verdict covers.
+          example: document
+        verdict:
+          type: string
+          enum: [approved, rejected, review]
+          description: Provider decision.
+          example: approved
+        risk_score:
+          type: integer
+          description: Raw provider risk score (0–100). Not surfaced to end clients.
+          example: 5
+        raw:
+          type: object
+          additionalProperties: true
+          description: Provider-specific raw payload, stored for audit and replay.
+
+    VerificationCaseResponse:
+      type: object
+      required: [id, user_id, type, status, risk_band, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          example: document
+        status:
+          type: string
+          enum: [pending, in_review, verified, rejected]
+          example: pending
+        risk_band:
+          type: string
+          enum: [low, medium, high]
+          example: low
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    OwnershipClaimResponse:
+      type: object
+      required: [id, user_id, property_address, claimant_name, status, method, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        property_address:
+          type: string
+          example: 123 Main St, Springfield, IL 62701
+        claimant_name:
+          type: string
+          example: Alice Wonderland
+        status:
+          type: string
+          enum: [pending, in_review, verified, rejected]
+          example: pending
+        method:
+          type: string
+          enum: [public_record, document, postcard, manual_review]
+          example: public_record
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AccessDecisionResponse:
+      type: object
+      required: [action, required_tier, required_qualifications, missing_qualifications, satisfied]
+      properties:
+        action:
+          type: string
+          example: make_offer
+        required_tier:
+          type: string
+          example: T2_VERIFIED
+        required_qualifications:
+          type: array
+          items:
+            type: string
+          example: []
+        missing_qualifications:
+          type: array
+          items:
+            type: string
+          example: [ownership]
+        satisfied:
+          type: boolean
+          example: false
 
     JWK:
       type: object

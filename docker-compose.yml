@@ -1,6 +1,7 @@
 services:
   api:
     build: .
+    image: pillow-app:latest
     ports:
       - "8080:8080"
     env_file: .env
@@ -9,6 +10,26 @@ services:
       REDIS_URL: redis://redis:6379/0
       JWT_PRIVATE_KEY_PATH: /run/secrets/private.pem
       JWT_PUBLIC_KEY_PATH: /run/secrets/public.pem
+    volumes:
+      - ./secrets:/run/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    image: pillow-app:latest
+    entrypoint: ["./worker"]
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgres://pillow:secret@postgres:5432/pillow_dev?sslmode=disable
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_PRIVATE_KEY_PATH=/run/secrets/private.pem
+      - JWT_PUBLIC_KEY_PATH=/run/secrets/public.pem
+      - WORKER_ENABLED=true
     volumes:
       - ./secrets:/run/secrets:ro
     depends_on:

@@ -18,6 +18,7 @@ import (
 	infrapostgres "github.com/kodiahbertrand/pillow/internal/infrastructure/postgres"
 	infraredis "github.com/kodiahbertrand/pillow/internal/infrastructure/redis"
 	"github.com/kodiahbertrand/pillow/internal/infrastructure/tokenutil"
+	"github.com/kodiahbertrand/pillow/internal/kyc"
 	"github.com/kodiahbertrand/pillow/internal/middleware"
 )
 
@@ -57,6 +58,13 @@ func New(cfg *config.Config) (*App, error) {
 	authSvc := auth.NewServiceWithOAuth(authRepo, issuer, auditLog, authRepo, oauthProvider)
 	authHandler := auth.NewHandler(authSvc, issuer, authRepo, oauthProvider)
 
+	kycComponents, err := buildKYC(cfg, db, rdb)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	kycHandler := kyc.NewHandler(kycComponents.service, kycComponents.webhookVerifier)
+
 	f := fiber.New(fiber.Config{
 		ErrorHandler: errorHandler,
 		AppName:      cfg.App.Name,
@@ -81,6 +89,17 @@ func New(cfg *config.Config) (*App, error) {
 			changePassword: authHandler.ChangePassword,
 			oauthInitiate:  authHandler.OAuthInitiate,
 			oauthCallback:  authHandler.OAuthCallback,
+		},
+		kyc: kycRoutes{
+			getProfile:            kycHandler.GetProfile,
+			startVerification:     kycHandler.StartVerification,
+			uploadDocument:        kycHandler.UploadDocument,
+			getCase:               kycHandler.GetCase,
+			startOwnershipClaim:   kycHandler.StartOwnershipClaim,
+			submitLicense:         kycHandler.SubmitLicense,
+			startBusinessVerif:    kycHandler.StartBusinessVerification,
+			handleProviderWebhook: kycHandler.HandleProviderWebhook,
+			deleteProfile:         kycHandler.DeleteProfile,
 		},
 		issuer:      issuer,
 		authRepo:    authRepo,

@@ -157,14 +157,15 @@ func AuthEventModelFrom(e *domain.AuthEvent) *AuthEventModel {
 }
 
 type KYCProfileModel struct {
-	ID             string    `gorm:"primarykey;type:uuid;default:gen_random_uuid()"`
-	UserID         string    `gorm:"type:uuid;not null;uniqueIndex"`
-	Role           string    `gorm:"not null"`
-	Tier           int       `gorm:"not null;default:0"`
-	Status         string    `gorm:"not null"`
-	Qualifications []string  `gorm:"type:jsonb;serializer:json"`
-	CreatedAt      time.Time `gorm:"not null;autoCreateTime"`
-	UpdatedAt      time.Time `gorm:"not null;autoUpdateTime"`
+	ID             string     `gorm:"primarykey;type:uuid;default:gen_random_uuid()"`
+	UserID         string     `gorm:"type:uuid;not null;uniqueIndex"`
+	Role           string     `gorm:"not null"`
+	Tier           int        `gorm:"not null;default:0"`
+	Status         string     `gorm:"not null"`
+	Qualifications []string   `gorm:"type:jsonb;serializer:json"`
+	DeletedAt      *time.Time `gorm:"index:,where:deleted_at IS NULL"`
+	CreatedAt      time.Time  `gorm:"not null;autoCreateTime"`
+	UpdatedAt      time.Time  `gorm:"not null;autoUpdateTime"`
 }
 
 func (m *KYCProfileModel) TableName() string { return "kyc_profiles" }
@@ -176,6 +177,7 @@ func (m *KYCProfileModel) ToDomain() *domain.KYCProfile {
 		Tier:           domain.Tier(m.Tier),
 		Status:         domain.VerificationStatus(m.Status),
 		Qualifications: qualificationsToDomain(m.Qualifications),
+		DeletedAt:      m.DeletedAt,
 		CreatedAt:      m.CreatedAt,
 		UpdatedAt:      m.UpdatedAt,
 	}
@@ -188,6 +190,7 @@ func KYCProfileModelFrom(p *domain.KYCProfile) *KYCProfileModel {
 		Tier:           int(p.Tier),
 		Status:         string(p.Status),
 		Qualifications: qualificationsToStrings(p.Qualifications),
+		DeletedAt:      p.DeletedAt,
 		CreatedAt:      p.CreatedAt,
 		UpdatedAt:      p.UpdatedAt,
 	}
@@ -238,6 +241,7 @@ type KYCCheckModel struct {
 	ProviderEventID string         `gorm:"not null;default:''"`
 	RiskScore       int            `gorm:"not null;default:0"`
 	RawPayload      map[string]any `gorm:"type:jsonb;serializer:json"`
+	ExpiresAt       *time.Time     `gorm:""`
 	CreatedAt       time.Time      `gorm:"not null;autoCreateTime"`
 	UpdatedAt       time.Time      `gorm:"not null;autoUpdateTime"`
 }
@@ -254,6 +258,7 @@ func (m *KYCCheckModel) ToDomain() *domain.Check {
 		ProviderEventID: m.ProviderEventID,
 		RiskScore:       domain.RiskScore(m.RiskScore),
 		RawPayload:      m.RawPayload,
+		ExpiresAt:       m.ExpiresAt,
 		CreatedAt:       m.CreatedAt,
 		UpdatedAt:       m.UpdatedAt,
 	}
@@ -269,6 +274,7 @@ func KYCCheckModelFrom(c *domain.Check) *KYCCheckModel {
 		ProviderEventID: c.ProviderEventID,
 		RiskScore:       int(c.RiskScore),
 		RawPayload:      c.RawPayload,
+		ExpiresAt:       c.ExpiresAt,
 		CreatedAt:       c.CreatedAt,
 		UpdatedAt:       c.UpdatedAt,
 	}

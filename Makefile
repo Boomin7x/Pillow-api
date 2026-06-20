@@ -1,13 +1,19 @@
-.PHONY: run build test lint migrate-up migrate-down keys docker-up docker-down
+.PHONY: run run-worker build build-worker test lint migrate-up migrate-down keys docker-up docker-down
 
 # ── Dev ──────────────────────────────────────────────────────────────────────
 
 run:
 	go run ./cmd/api
 
+run-worker:
+	WORKER_ENABLED=true go run ./cmd/worker
+
 build:
 	go build -ldflags="-s -w" -o bin/api ./cmd/api
 	go build -ldflags="-s -w" -o bin/migrate ./cmd/migrate
+
+build-worker:
+	go build -ldflags="-s -w" -o bin/worker ./cmd/worker
 
 test:
 	go test ./... -count=1

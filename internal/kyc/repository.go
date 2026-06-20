@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/kodiahbertrand/pillow/internal/apperrors"
 	"github.com/kodiahbertrand/pillow/internal/domain"
@@ -34,7 +35,7 @@ func (r *kycRepository) CreateProfile(ctx context.Context, profile *domain.KYCPr
 
 func (r *kycRepository) FindProfileByUserID(ctx context.Context, userID string) (*domain.KYCProfile, error) {
 	var model pgmodels.KYCProfileModel
-	if err := r.db.WithContext(ctx).Where("user_id = ?", userID).First(&model).Error; err != nil {
+	if err := r.db.WithContext(ctx).Where("user_id = ? AND deleted_at IS NULL", userID).First(&model).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, apperrors.NotFound("kyc profile not found")
 		}
@@ -184,6 +185,68 @@ func (r *kycRepository) UpdateOwnershipClaim(ctx context.Context, claim *domain.
 		return apperrors.NotFound("ownership claim not found")
 	}
 	claim.UpdatedAt = model.UpdatedAt
+	return nil
+}
+
+func (r *kycRepository) ListCasesStuckInReview(ctx context.Context, olderThan time.Time, limit int) ([]domain.VerificationCase, error) {
+	var models []pgmodels.VerificationCaseModel
+	if err := r.db.WithContext(ctx).
+		Where("status = ? AND updated_at < ?", string(domain.StatusInReview), olderThan).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&models).Error; err != nil {
+		return nil, fmt.Errorf("kyc: list cases stuck in review: %w", err)
+	}
+	cases := make([]domain.VerificationCase, len(models))
+	for i := range models {
+		cases[i] = *models[i].ToDomain()
+	}
+	return cases, nil
+}
+
+func (r *kycRepository) ListChecksExpiringBefore(ctx context.Context, t time.Time, limit int) ([]domain.Check, error) {
+	var models []pgmodels.KYCCheckModel
+	if err := r.db.WithContext(ctx).
+		Where("expires_at IS NOT NULL AND expires_at < ?", t).
+		Order("expires_at ASC").
+		Limit(limit).
+		Find(&models).Error; err != nil {
+		return nil, fmt.Errorf("kyc: list checks expiring before: %w", err)
+	}
+	checks := make([]domain.Check, len(models))
+	for i := range models {
+		checks[i] = *models[i].ToDomain()
+	}
+	return checks, nil
+}
+
+func (r *kycRepository) ListProfilesForRescreen(ctx context.Context, minTier domain.Tier, limit int, cursor string) ([]domain.KYCProfile, error) {
+	q := r.db.WithContext(ctx).Where("tier >= ? AND deleted_at IS NULL", int(minTier))
+	if cursor != "" {
+		q = q.Where("user_id > ?", cursor)
+	}
+	var models []pgmodels.KYCProfileModel
+	if err := q.Order("user_id ASC").Limit(limit).Find(&models).Error; err != nil {
+		return nil, fmt.Errorf("kyc: list profiles for rescreen: %w", err)
+	}
+	profiles := make([]domain.KYCProfile, len(models))
+	for i := range models {
+		profiles[i] = *models[i].ToDomain()
+	}
+	return profiles, nil
+}
+
+func (r *kycRepository) TombstoneProfile(ctx context.Context, userID string) error {
+	result := r.db.WithContext(ctx).
+		Model(&pgmodels.KYCProfileModel{}).
+		Where("user_id = ? AND deleted_at IS NULL", userID).
+		Update("deleted_at", time.Now())
+	if result.Error != nil {
+		return fmt.Errorf("kyc: tombstone profile: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return apperrors.NotFound("kyc profile not found")
+	}
 	return nil
 }
 

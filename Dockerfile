@@ -8,6 +8,7 @@ RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/api ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/worker ./cmd/worker
 
 # --- runtime stage ---
 FROM alpine:3.20
@@ -17,6 +18,7 @@ RUN apk --no-cache add ca-certificates tzdata
 WORKDIR /app
 
 COPY --from=builder /bin/api .
+COPY --from=builder /bin/worker .
 COPY migrations/ ./migrations/
 COPY docs/api/ ./docs/api/
 

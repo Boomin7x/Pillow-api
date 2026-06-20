@@ -11,7 +11,7 @@ type User struct {
 	DisplayName string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
-}	
+}
 
 type UserRepository interface {
 	Create(ctx context.Context, u *User) error

@@ -5,12 +5,12 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	goredis "github.com/redis/go-redis/v9"
 	"github.com/kodiahbertrand/pillow/internal/apperrors"
 	"github.com/kodiahbertrand/pillow/internal/config"
 	"github.com/kodiahbertrand/pillow/internal/domain"
 	infraredis "github.com/kodiahbertrand/pillow/internal/infrastructure/redis"
 	"github.com/kodiahbertrand/pillow/internal/middleware"
+	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -25,8 +25,21 @@ type authRoutes struct {
 	oauthCallback  fiber.Handler
 }
 
+type kycRoutes struct {
+	getProfile            fiber.Handler
+	startVerification     fiber.Handler
+	uploadDocument        fiber.Handler
+	getCase               fiber.Handler
+	startOwnershipClaim   fiber.Handler
+	submitLicense         fiber.Handler
+	startBusinessVerif    fiber.Handler
+	handleProviderWebhook fiber.Handler
+	deleteProfile         fiber.Handler
+}
+
 type routeDeps struct {
 	auth        authRoutes
+	kyc         kycRoutes
 	issuer      domain.TokenIssuer
 	authRepo    domain.AuthRepository
 	rateLimiter *infraredis.RateLimiter
@@ -90,4 +103,36 @@ func registerRoutes(f *fiber.App, deps routeDeps) {
 		c.Set("Cache-Control", "public, max-age=300")
 		return c.JSON(fiber.Map{"keys": deps.issuer.PublicKeySet()})
 	})
+
+	f.Post("/kyc/webhooks/provider",
+		middleware.LimitByIP(deps.rateLimiter, "kyc_webhook", deps.rl.KYCWebhookIPLimit, deps.rl.KYCWebhookIPWindow),
+		deps.kyc.handleProviderWebhook,
+	)
+
+	kycGroup := f.Group("/kyc")
+	kycGroup.Use(middleware.RequireAuth(deps.issuer, deps.authRepo))
+
+	kycGroup.Get("/profile", deps.kyc.getProfile)
+	kycGroup.Delete("/profile", deps.kyc.deleteProfile)
+	kycGroup.Post("/verifications",
+		middleware.LimitByIP(deps.rateLimiter, "kyc_start", deps.rl.KYCStartIPLimit, deps.rl.KYCStartIPWindow),
+		deps.kyc.startVerification,
+	)
+	kycGroup.Post("/verifications/:id/documents",
+		middleware.LimitByIP(deps.rateLimiter, "kyc_upload", deps.rl.KYCUploadIPLimit, deps.rl.KYCUploadIPWindow),
+		deps.kyc.uploadDocument,
+	)
+	kycGroup.Get("/verifications/:id", deps.kyc.getCase)
+	kycGroup.Post("/ownership-claims",
+		middleware.LimitByIP(deps.rateLimiter, "kyc_ownership", deps.rl.KYCOwnershipIPLimit, deps.rl.KYCOwnershipIPWindow),
+		deps.kyc.startOwnershipClaim,
+	)
+	kycGroup.Post("/licenses",
+		middleware.LimitByIP(deps.rateLimiter, "kyc_license", deps.rl.KYCLicenseIPLimit, deps.rl.KYCLicenseIPWindow),
+		deps.kyc.submitLicense,
+	)
+	kycGroup.Post("/business",
+		middleware.LimitByIP(deps.rateLimiter, "kyc_business", deps.rl.KYCBusinessIPLimit, deps.rl.KYCBusinessIPWindow),
+		deps.kyc.startBusinessVerif,
+	)
 }

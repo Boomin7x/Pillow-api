@@ -44,12 +44,12 @@ func HTTPStatus(code Code) int {
 	}
 }
 
-func New(code Code, message string) *AppError      { return &AppError{Code: code, Message: message} }
-func BadRequest(msg string) *AppError              { return New(CodeBadRequest, msg) }
-func Unauthorized(msg string) *AppError            { return New(CodeUnauthorized, msg) }
-func Forbidden(msg string) *AppError               { return New(CodeForbidden, msg) }
-func NotFound(msg string) *AppError                { return New(CodeNotFound, msg) }
-func Conflict(msg string) *AppError                { return New(CodeConflict, msg) }
-func Validation(msg string) *AppError              { return New(CodeValidation, msg) }
-func RateLimit(msg string) *AppError               { return New(CodeRateLimit, msg) }
-func Internal(msg string) *AppError                { return New(CodeInternal, msg) }
+func New(code Code, message string) *AppError { return &AppError{Code: code, Message: message} }
+func BadRequest(msg string) *AppError         { return New(CodeBadRequest, msg) }
+func Unauthorized(msg string) *AppError       { return New(CodeUnauthorized, msg) }
+func Forbidden(msg string) *AppError          { return New(CodeForbidden, msg) }
+func NotFound(msg string) *AppError           { return New(CodeNotFound, msg) }
+func Conflict(msg string) *AppError           { return New(CodeConflict, msg) }
+func Validation(msg string) *AppError         { return New(CodeValidation, msg) }
+func RateLimit(msg string) *AppError          { return New(CodeRateLimit, msg) }
+func Internal(msg string) *AppError           { return New(CodeInternal, msg) }

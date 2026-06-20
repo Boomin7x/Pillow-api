@@ -15,6 +15,7 @@ type Config struct {
 	OAuth     OAuthConfig
 	RateLimit RateLimitConfig
 	KYC       KYCConfig
+	Worker    WorkerConfig
 }
 
 type AppConfig struct {
@@ -55,6 +56,17 @@ type KYCConfig struct {
 	License          ExternalProviderConfig
 	Business         ExternalProviderConfig
 	Vault            DocumentVaultConfig
+	WebhookSecret    string
+	TierCacheTTL     time.Duration
+}
+
+type WorkerConfig struct {
+	Enabled               bool
+	ReconcileInterval     time.Duration
+	ReconcileSLA          time.Duration
+	RescreenInterval      time.Duration
+	LicenseExpiryInterval time.Duration
+	VaultPurgeInterval    time.Duration
 }
 
 type ExternalProviderConfig struct {
@@ -83,6 +95,18 @@ type RateLimitConfig struct {
 	RefreshIPWindow      time.Duration
 	OAuthIPLimit         int
 	OAuthIPWindow        time.Duration
+	KYCStartIPLimit      int
+	KYCStartIPWindow     time.Duration
+	KYCUploadIPLimit     int
+	KYCUploadIPWindow    time.Duration
+	KYCWebhookIPLimit    int
+	KYCWebhookIPWindow   time.Duration
+	KYCOwnershipIPLimit  int
+	KYCOwnershipIPWindow time.Duration
+	KYCLicenseIPLimit    int
+	KYCLicenseIPWindow   time.Duration
+	KYCBusinessIPLimit   int
+	KYCBusinessIPWindow  time.Duration
 }
 
 func Load() (*Config, error) {
@@ -156,6 +180,8 @@ func Load() (*Config, error) {
 				PublicBaseURL:    getEnv("KYC_VAULT_PUBLIC_BASE_URL", "http://localhost:8080/kyc/documents"),
 				RetentionTTL:     time.Duration(getEnvInt("KYC_VAULT_RETENTION_DAYS", 90)) * 24 * time.Hour,
 			},
+			WebhookSecret: getEnv("KYC_WEBHOOK_SECRET", ""),
+			TierCacheTTL:  time.Duration(getEnvInt("KYC_TIER_CACHE_TTL_MINUTES", 30)) * time.Minute,
 		},
 		RateLimit: RateLimitConfig{
 			LoginIPLimit:         getEnvInt("RATELIMIT_LOGIN_IP_LIMIT", 10),
@@ -168,6 +194,26 @@ func Load() (*Config, error) {
 			RefreshIPWindow:      time.Duration(getEnvInt("RATELIMIT_REFRESH_IP_WINDOW_SECONDS", 60)) * time.Second,
 			OAuthIPLimit:         getEnvInt("RATELIMIT_OAUTH_IP_LIMIT", 20),
 			OAuthIPWindow:        time.Duration(getEnvInt("RATELIMIT_OAUTH_IP_WINDOW_SECONDS", 60)) * time.Second,
+			KYCStartIPLimit:      getEnvInt("RATELIMIT_KYC_START_IP_LIMIT", 10),
+			KYCStartIPWindow:     time.Duration(getEnvInt("RATELIMIT_KYC_START_IP_WINDOW_SECONDS", 60)) * time.Second,
+			KYCUploadIPLimit:     getEnvInt("RATELIMIT_KYC_UPLOAD_IP_LIMIT", 20),
+			KYCUploadIPWindow:    time.Duration(getEnvInt("RATELIMIT_KYC_UPLOAD_IP_WINDOW_SECONDS", 60)) * time.Second,
+			KYCWebhookIPLimit:    getEnvInt("RATELIMIT_KYC_WEBHOOK_IP_LIMIT", 60),
+			KYCWebhookIPWindow:   time.Duration(getEnvInt("RATELIMIT_KYC_WEBHOOK_IP_WINDOW_SECONDS", 60)) * time.Second,
+			KYCOwnershipIPLimit:  getEnvInt("RATELIMIT_KYC_OWNERSHIP_IP_LIMIT", 10),
+			KYCOwnershipIPWindow: time.Duration(getEnvInt("RATELIMIT_KYC_OWNERSHIP_IP_WINDOW_SECONDS", 60)) * time.Second,
+			KYCLicenseIPLimit:    getEnvInt("RATELIMIT_KYC_LICENSE_IP_LIMIT", 10),
+			KYCLicenseIPWindow:   time.Duration(getEnvInt("RATELIMIT_KYC_LICENSE_IP_WINDOW_SECONDS", 60)) * time.Second,
+			KYCBusinessIPLimit:   getEnvInt("RATELIMIT_KYC_BUSINESS_IP_LIMIT", 10),
+			KYCBusinessIPWindow:  time.Duration(getEnvInt("RATELIMIT_KYC_BUSINESS_IP_WINDOW_SECONDS", 60)) * time.Second,
+		},
+		Worker: WorkerConfig{
+			Enabled:               getEnvBool("WORKER_ENABLED", false),
+			ReconcileInterval:     time.Duration(getEnvInt("WORKER_RECONCILE_INTERVAL_MINUTES", 15)) * time.Minute,
+			ReconcileSLA:          time.Duration(getEnvInt("WORKER_RECONCILE_SLA_HOURS", 24)) * time.Hour,
+			RescreenInterval:      time.Duration(getEnvInt("WORKER_RESCREEN_INTERVAL_HOURS", 24)) * time.Hour,
+			LicenseExpiryInterval: time.Duration(getEnvInt("WORKER_LICENSE_EXPIRY_INTERVAL_HOURS", 6)) * time.Hour,
+			VaultPurgeInterval:    time.Duration(getEnvInt("WORKER_VAULT_PURGE_INTERVAL_HOURS", 24)) * time.Hour,
 		},
 	}
 
@@ -190,6 +236,13 @@ func getEnvInt(key string, fallback int) int {
 		if i, err := strconv.Atoi(v); err == nil {
 			return i
 		}
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		return v == "true" || v == "1"
 	}
 	return fallback
 }
