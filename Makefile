@@ -1,4 +1,4 @@
-.PHONY: run run-worker build build-worker test lint migrate-up migrate-down keys docker-up docker-down
+.PHONY: run run-worker build build-worker test test-integration lint migrate-up migrate-down keys docker-up docker-down
 
 # ── Dev ──────────────────────────────────────────────────────────────────────
 
@@ -17,6 +17,9 @@ build-worker:
 
 test:
 	go test ./... -count=1
+
+test-integration:
+	go test -tags=integration ./test/integration/... -count=1
 
 test-cover:
 	go test ./... -count=1 -coverprofile=coverage.out

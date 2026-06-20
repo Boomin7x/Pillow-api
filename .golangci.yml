@@ -1,5 +1,9 @@
 version: "2"
 
+run:
+  build-tags:
+    - integration
+
 linters:
   enable:
     - depguard
@@ -10,6 +14,7 @@ linters:
         domain-purity:
           files:
             - "**/internal/domain/*.go"
+            - "!**/*_test.go"
           allow:
             - "$gostd"
         service-no-infrastructure:

@@ -449,26 +449,6 @@ func (s *kycService) advanceAfterVerification(ctx context.Context, userID string
 	})
 	return nil
 }
-
-func (s *kycService) buildCheck(caseID string, checkType domain.CheckType, result *domain.ProviderCheckResult) *domain.Check {
-	status := domain.StatusInReview
-	switch result.Verdict {
-	case domain.VerdictApproved:
-		status = domain.StatusVerified
-	case domain.VerdictRejected:
-		status = domain.StatusRejected
-	}
-	return &domain.Check{
-		CaseID:          caseID,
-		Type:            checkType,
-		Status:          status,
-		Verdict:         result.Verdict,
-		ProviderEventID: result.ProviderEventID,
-		RiskScore:       result.RiskScore,
-		RawPayload:      result.RawPayload,
-	}
-}
-
 func (s *kycService) loadProfileForAccess(ctx context.Context, userID string) (*domain.KYCProfile, error) {
 	if cached := s.cachedProfile(ctx, userID); cached != nil {
 		return cached, nil

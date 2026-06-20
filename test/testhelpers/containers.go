@@ -23,6 +23,15 @@ import (
 func NewPostgresContainer(t *testing.T, ctx context.Context) (*gorm.DB, func()) {
 	t.Helper()
 
+	dsn, cleanup := NewPostgresDSN(t, ctx)
+	runMigrations(t, dsn)
+	db := NewPostgres(t, ctx, dsn)
+	return db, cleanup
+}
+
+func NewPostgresDSN(t *testing.T, ctx context.Context) (string, func()) {
+	t.Helper()
+
 	container, err := tcpostgres.Run(ctx,
 		"postgres:16-alpine",
 		tcpostgres.WithDatabase("pillow_test"),
@@ -43,16 +52,17 @@ func NewPostgresContainer(t *testing.T, ctx context.Context) (*gorm.DB, func()) 
 		t.Fatalf("testhelpers: postgres connection string: %v", err)
 	}
 
-	runMigrations(t, dsn)
-
-	db := NewPostgres(t, ctx, dsn)
-
 	cleanup := func() {
 		if err := container.Terminate(ctx); err != nil {
 			t.Logf("testhelpers: terminate postgres container: %v", err)
 		}
 	}
-	return db, cleanup
+	return dsn, cleanup
+}
+
+func MigrationsDir() string {
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "migrations")
 }
 
 func NewRedisContainer(t *testing.T, ctx context.Context) (*redis.Client, func()) {
@@ -85,17 +95,11 @@ func NewRedisContainer(t *testing.T, ctx context.Context) (*redis.Client, func()
 func runMigrations(t *testing.T, dsn string) {
 	t.Helper()
 
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("testhelpers: cannot resolve migrations path")
-	}
-	migrationsPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "migrations")
-
-	m, err := migrate.New("file://"+migrationsPath, dsn)
+	m, err := migrate.New("file://"+MigrationsDir(), dsn)
 	if err != nil {
 		t.Fatalf("testhelpers: migrate init: %v", err)
 	}
-	defer m.Close()
+	defer func() { _, _ = m.Close() }()
 
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		t.Fatalf("testhelpers: migrate up: %v", err)

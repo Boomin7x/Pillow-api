@@ -170,19 +170,6 @@ func newTestAppNoAuth() *fiber.App {
 	return f
 }
 
-func newTestAppDeleteOnly(svc domain.KYCService) *fiber.App {
-	f := fiber.New(fiber.Config{
-		ErrorHandler: errorHandler,
-	})
-	f.Use(func(c *fiber.Ctx) error {
-		c.Locals("claims", &domain.Claims{UserID: "u1", Email: "test@test.com"})
-		return c.Next()
-	})
-	h := kyc.NewHandler(svc, &mockWebhookVerifier{})
-	f.Delete("/kyc/profile", h.DeleteProfile)
-	return f
-}
-
 func TestHandler_GetProfile(t *testing.T) {
 	t.Run("returns profile without action query", func(t *testing.T) {
 		app := newTestApp(&mockKYCService{})

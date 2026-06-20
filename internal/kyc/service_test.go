@@ -344,15 +344,6 @@ func rejectedResult() *domain.ProviderCheckResult {
 	}
 }
 
-func reviewResult() *domain.ProviderCheckResult {
-	return &domain.ProviderCheckResult{
-		ProviderEventID: "evt-review",
-		Verdict:         domain.VerdictReview,
-		RiskScore:       50,
-		RawPayload:      map[string]any{"note": "manual check"},
-	}
-}
-
 func defaultProfile(userID string) *domain.KYCProfile {
 	return &domain.KYCProfile{
 		UserID: userID,

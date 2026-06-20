@@ -291,7 +291,6 @@ type QueueConsumer struct {
 	queue     domain.VerificationQueue
 	cache     domain.TierCache
 	metrics   metrics.Metrics
-	interval  time.Duration
 }
 
 func NewQueueConsumer(

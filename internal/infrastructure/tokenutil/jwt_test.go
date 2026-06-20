@@ -91,11 +91,11 @@ func TestPublicKeySet_RoundTrip(t *testing.T) {
 	recoveredN := new(big.Int).SetBytes(nBytes)
 	recoveredE := int(new(big.Int).SetBytes(eBytes).Int64())
 
-	if recoveredN.Cmp(privKey.PublicKey.N) != 0 {
+	if recoveredN.Cmp(privKey.N) != 0 {
 		t.Error("decoded n does not match original public key modulus")
 	}
-	if recoveredE != privKey.PublicKey.E {
-		t.Errorf("decoded e = %d, want %d", recoveredE, privKey.PublicKey.E)
+	if recoveredE != privKey.E {
+		t.Errorf("decoded e = %d, want %d", recoveredE, privKey.E)
 	}
 }
 

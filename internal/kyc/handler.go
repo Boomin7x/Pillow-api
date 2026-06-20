@@ -158,7 +158,7 @@ func (h *kycHandler) UploadDocument(c *fiber.Ctx) error {
 	if err != nil {
 		return apperrors.BadRequest("could not read document file")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	content, err := io.ReadAll(io.LimitReader(file, maxDocumentBytes))
 	if err != nil {
