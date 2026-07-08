@@ -116,6 +116,10 @@ type AuthRepository interface {
 	FindUserByEmail(ctx context.Context, email string) (*User, error)
 	FindUserByID(ctx context.Context, id string) (*User, error)
 
+	AssignRole(ctx context.Context, userID, role string) error
+	RemoveRole(ctx context.Context, userID, role string) error
+	ListRoles(ctx context.Context, userID string) ([]string, error)
+
 	CreateCredential(ctx context.Context, c *Credential) error
 	FindCredentialByUserID(ctx context.Context, userID string) (*Credential, error)
 	UpdateCredentialPassword(ctx context.Context, userID, passwordHash string) error
@@ -148,6 +152,7 @@ type PKCEStore interface {
 type OAuthIdentityClaims struct {
 	ProviderID string
 	Email      string
+	Name       string
 }
 
 type OAuthProvider interface {
@@ -159,6 +164,7 @@ type OAuthLoginInput struct {
 	Provider   string
 	ProviderID string
 	Email      string
+	Name       string
 	IPAddress  string
 	UserAgent  string
 }

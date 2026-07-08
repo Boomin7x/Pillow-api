@@ -36,6 +36,8 @@ tags:
     description: Standard well-known endpoints for token verification and service discovery
   - name: health
     description: Liveness and readiness probes
+  - name: admin
+    description: Admin-only operations (requires the `admin` role); manual KYC review console
 
 # ---------------------------------------------------------------------------
 # PATHS
@@ -106,6 +108,43 @@ paths:
           description: All dependencies healthy
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
+
+  # --- Admin ----------------------------------------------------------------
+
+  /admin/ping:
+    get:
+      tags: [admin]
+      summary: Admin group health stub
+      description: |
+        Verifies the admin middleware chain (Bearer auth → `admin` role → rate limit).
+        Returns 200 only for a token whose `roles` claim contains `admin`; any other
+        authenticated user receives 403, unauthenticated requests receive 401.
+      operationId: adminPing
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Caller is an authenticated admin
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Authenticated but missing the `admin` role
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppError"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   # --- Auth -----------------------------------------------------------------
 

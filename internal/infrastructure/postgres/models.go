@@ -36,6 +36,15 @@ func UserModelFrom(u *domain.User) *UserModel {
 	}
 }
 
+type UserRoleModel struct {
+	ID        string    `gorm:"primarykey;type:uuid;default:gen_random_uuid()"`
+	UserID    string    `gorm:"type:uuid;not null;uniqueIndex:idx_user_roles_user_role"`
+	Role      string    `gorm:"not null;uniqueIndex:idx_user_roles_user_role"`
+	CreatedAt time.Time `gorm:"not null;autoCreateTime"`
+}
+
+func (m *UserRoleModel) TableName() string { return "user_roles" }
+
 type CredentialModel struct {
 	ID           string    `gorm:"primarykey;type:uuid;default:gen_random_uuid()"`
 	UserID       string    `gorm:"type:uuid;not null;uniqueIndex"`

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -32,7 +33,9 @@ func RequireAuth(verifier tokenValidator, bl blocklist) fiber.Handler {
 
 		if claims.TokenID != "" {
 			blocked, err := bl.IsTokenBlocklisted(c.UserContext(), claims.TokenID)
-			if err == nil && blocked {
+			if err != nil {
+				slog.Warn("auth: blocklist check degraded, failing open", "error", err, "jti", claims.TokenID)
+			} else if blocked {
 				return apperrors.Unauthorized("token has been revoked")
 			}
 		}

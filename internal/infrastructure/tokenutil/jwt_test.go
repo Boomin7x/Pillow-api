@@ -5,14 +5,17 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kodiahbertrand/pillow/internal/config"
+	"github.com/kodiahbertrand/pillow/internal/domain"
 	"github.com/kodiahbertrand/pillow/internal/infrastructure/tokenutil"
 )
 
@@ -112,5 +115,82 @@ func TestPublicKeySet_HasOneKeyPerIssuer(t *testing.T) {
 	keys := issuer.PublicKeySet()
 	if len(keys) != 1 {
 		t.Errorf("len(keys) = %d, want 1", len(keys))
+	}
+}
+
+func newIssuerForKey(t *testing.T, privKey *rsa.PrivateKey, iss, aud string) domain.TokenIssuer {
+	t.Helper()
+	privPath, pubPath := writePEMFiles(t, privKey)
+	issuer, err := tokenutil.NewJWTIssuer(config.JWTConfig{
+		PrivateKeyPath: privPath,
+		PublicKeyPath:  pubPath,
+		AccessTTL:      15 * time.Minute,
+		Issuer:         iss,
+		Audience:       aud,
+	})
+	if err != nil {
+		t.Fatalf("NewJWTIssuer: %v", err)
+	}
+	return issuer
+}
+
+func TestValidateAccessToken_RoundTripWithIssAud(t *testing.T) {
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	issuer := newIssuerForKey(t, privKey, "pillow", "pillow-api")
+
+	token, err := issuer.IssueAccessToken(domain.Claims{UserID: "u1", Email: "u1@example.com", TokenID: "jti-1"})
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	claims, err := issuer.ValidateAccessToken(token)
+	if err != nil {
+		t.Fatalf("validate same-audience token: %v", err)
+	}
+	if claims.UserID != "u1" {
+		t.Errorf("sub = %q, want u1", claims.UserID)
+	}
+}
+
+func TestValidateAccessToken_RejectsWrongAudience(t *testing.T) {
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	minter := newIssuerForKey(t, privKey, "pillow", "pillow-api")
+	verifier := newIssuerForKey(t, privKey, "pillow", "some-other-audience")
+
+	token, err := minter.IssueAccessToken(domain.Claims{UserID: "u1", TokenID: "jti-1"})
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	if _, err := verifier.ValidateAccessToken(token); err == nil {
+		t.Fatal("expected a token minted for a different audience to be rejected")
+	}
+}
+
+func TestAccessToken_KidMatchesJWKS(t *testing.T) {
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	issuer := newIssuerForKey(t, privKey, "pillow", "pillow-api")
+
+	token, err := issuer.IssueAccessToken(domain.Claims{UserID: "u1", TokenID: "jti-1"})
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("expected a 3-part JWT, got %d parts", len(parts))
+	}
+	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		t.Fatalf("decode header: %v", err)
+	}
+	var header struct {
+		Kid string `json:"kid"`
+	}
+	if err := json.Unmarshal(headerJSON, &header); err != nil {
+		t.Fatalf("unmarshal header: %v", err)
+	}
+
+	jwks := issuer.PublicKeySet()
+	if header.Kid == "" || header.Kid != jwks[0].KeyID {
+		t.Errorf("token kid = %q, JWKS kid = %q; want equal and non-empty", header.Kid, jwks[0].KeyID)
 	}
 }

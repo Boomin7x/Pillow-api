@@ -42,6 +42,8 @@ type JWTConfig struct {
 	PublicKeyPath  string
 	AccessTTL      time.Duration
 	RefreshTTL     time.Duration
+	Issuer         string
+	Audience       string
 }
 
 type OAuthConfig struct {
@@ -57,6 +59,7 @@ type KYCConfig struct {
 	Business         ExternalProviderConfig
 	Vault            DocumentVaultConfig
 	WebhookSecret    string
+	ReviewMode       string
 	TierCacheTTL     time.Duration
 }
 
@@ -107,6 +110,8 @@ type RateLimitConfig struct {
 	KYCLicenseIPWindow   time.Duration
 	KYCBusinessIPLimit   int
 	KYCBusinessIPWindow  time.Duration
+	AdminIPLimit         int
+	AdminIPWindow        time.Duration
 }
 
 func Load() (*Config, error) {
@@ -142,6 +147,8 @@ func Load() (*Config, error) {
 			PublicKeyPath:  require("JWT_PUBLIC_KEY_PATH"),
 			AccessTTL:      time.Duration(getEnvInt("JWT_ACCESS_TTL_MINUTES", 15)) * time.Minute,
 			RefreshTTL:     time.Duration(getEnvInt("JWT_REFRESH_TTL_DAYS", 30)) * 24 * time.Hour,
+			Issuer:         getEnv("JWT_ISSUER", "pillow"),
+			Audience:       getEnv("JWT_AUDIENCE", "pillow-api"),
 		},
 		OAuth: OAuthConfig{
 			GoogleClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
@@ -206,6 +213,8 @@ func Load() (*Config, error) {
 			KYCLicenseIPWindow:   time.Duration(getEnvInt("RATELIMIT_KYC_LICENSE_IP_WINDOW_SECONDS", 60)) * time.Second,
 			KYCBusinessIPLimit:   getEnvInt("RATELIMIT_KYC_BUSINESS_IP_LIMIT", 10),
 			KYCBusinessIPWindow:  time.Duration(getEnvInt("RATELIMIT_KYC_BUSINESS_IP_WINDOW_SECONDS", 60)) * time.Second,
+			AdminIPLimit:         getEnvInt("RATELIMIT_ADMIN_IP_LIMIT", 60),
+			AdminIPWindow:        time.Duration(getEnvInt("RATELIMIT_ADMIN_IP_WINDOW_SECONDS", 60)) * time.Second,
 		},
 		Worker: WorkerConfig{
 			Enabled:               getEnvBool("WORKER_ENABLED", false),
@@ -221,7 +230,40 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("missing required environment variables: %v", missing)
 	}
 
+	reviewMode, err := resolveKYCReviewMode(
+		getEnv("KYC_REVIEW_MODE", ""),
+		cfg.KYC.IdentityProvider.BaseURL,
+		cfg.KYC.Ownership.BaseURL,
+		cfg.KYC.License.BaseURL,
+		cfg.KYC.Business.BaseURL,
+	)
+	if err != nil {
+		return nil, err
+	}
+	cfg.KYC.ReviewMode = reviewMode
+
 	return cfg, nil
+}
+
+const (
+	KYCReviewModeManual   = "manual"
+	KYCReviewModeProvider = "provider"
+)
+
+func resolveKYCReviewMode(explicit string, providerURLs ...string) (string, error) {
+	switch explicit {
+	case KYCReviewModeManual, KYCReviewModeProvider:
+		return explicit, nil
+	case "":
+	default:
+		return "", fmt.Errorf("invalid KYC_REVIEW_MODE %q: must be %q or %q", explicit, KYCReviewModeManual, KYCReviewModeProvider)
+	}
+	for _, url := range providerURLs {
+		if url != "" {
+			return KYCReviewModeProvider, nil
+		}
+	}
+	return KYCReviewModeManual, nil
 }
 
 func getEnv(key, fallback string) string {

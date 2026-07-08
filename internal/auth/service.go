@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -201,13 +202,25 @@ func (s *authService) issueTokenPair(ctx context.Context, user *domain.User, ip,
 	return s.issueTokenPairInFamily(ctx, user, uuid.New().String(), ip, ua)
 }
 
+func (s *authService) loadRoles(ctx context.Context, userID string) []string {
+	roles, err := s.repo.ListRoles(ctx, userID)
+	if err != nil {
+		slog.Warn("auth: list roles failed, issuing baseline role", "error", err, "user_id", userID)
+		return []string{"user"}
+	}
+	if len(roles) == 0 {
+		return []string{"user"}
+	}
+	return roles
+}
+
 func (s *authService) issueTokenPairInFamily(ctx context.Context, user *domain.User, familyID, ip, ua string) (*domain.AuthResult, error) {
 	tokenID := uuid.New().String()
 
 	accessToken, err := s.issuer.IssueAccessToken(domain.Claims{
 		UserID:    user.ID,
 		Email:     user.Email,
-		Roles:     []string{"user"},
+		Roles:     s.loadRoles(ctx, user.ID),
 		TokenID:   tokenID,
 		SessionID: familyID,
 	})
@@ -242,7 +255,7 @@ func (s *authService) issueTokenPairInFamily(ctx context.Context, user *domain.U
 		DeviceFingerprint: fingerprint,
 	}
 	if err := s.repo.CacheRefreshToken(ctx, hash, meta, refreshTokenTTL); err != nil {
-		_ = err
+		slog.Warn("auth: cache refresh token failed", "error", err)
 	}
 
 	return &domain.AuthResult{
@@ -276,6 +289,10 @@ func (s *authService) LogoutAll(ctx context.Context, input domain.LogoutAllInput
 func (s *authService) ChangePassword(ctx context.Context, input domain.ChangePasswordInput) error {
 	cred, err := s.repo.FindCredentialByUserID(ctx, input.UserID)
 	if err != nil {
+		var appErr *apperrors.AppError
+		if errors.As(err, &appErr) && appErr.Code == apperrors.CodeNotFound {
+			return apperrors.BadRequest("this account has no password set")
+		}
 		return fmt.Errorf("change password: find credential: %w", err)
 	}
 
@@ -319,7 +336,11 @@ func (s *authService) OAuthLogin(ctx context.Context, input domain.OAuthLoginInp
 	if err != nil {
 		var appErr *apperrors.AppError
 		if errors.As(err, &appErr) && appErr.Code == apperrors.CodeNotFound {
-			newUser := &domain.User{Email: input.Email, DisplayName: input.Email}
+			displayName := input.Name
+			if displayName == "" {
+				displayName = input.Email
+			}
+			newUser := &domain.User{Email: input.Email, DisplayName: displayName}
 			if err := s.repo.CreateUser(ctx, newUser); err != nil {
 				return nil, fmt.Errorf("oauth login: create user: %w", err)
 			}

@@ -477,6 +477,7 @@ type KYCRepository interface {
 	UpdateCase(ctx context.Context, verificationCase *VerificationCase) error
 	ListPendingCases(ctx context.Context, limit int) ([]VerificationCase, error)
 	ListCasesStuckInReview(ctx context.Context, olderThan time.Time, limit int) ([]VerificationCase, error)
+	ListCasesAwaitingReview(ctx context.Context, status VerificationStatus, checkType CheckType, limit int, cursor string) ([]VerificationCase, error)
 
 	CreateCheck(ctx context.Context, check *Check) error
 	FindCheckByProviderEventID(ctx context.Context, providerEventID string) (*Check, error)
@@ -486,6 +487,7 @@ type KYCRepository interface {
 	CreateOwnershipClaim(ctx context.Context, claim *OwnershipClaim) error
 	FindOwnershipClaimByID(ctx context.Context, id string) (*OwnershipClaim, error)
 	UpdateOwnershipClaim(ctx context.Context, claim *OwnershipClaim) error
+	ListClaimsAwaitingReview(ctx context.Context, status VerificationStatus, limit int, cursor string) ([]OwnershipClaim, error)
 
 	ListProfilesForRescreen(ctx context.Context, minTier Tier, limit int, cursor string) ([]KYCProfile, error)
 }

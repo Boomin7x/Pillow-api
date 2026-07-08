@@ -55,6 +55,7 @@ func NewWorker(cfg *config.Config) (*Worker, error) {
 			components.business, components.notifier,
 			components.queue, components.cache,
 			metrics.NewNoop(),
+			cfg.KYC.ReviewMode == config.KYCReviewModeManual,
 		),
 		cfg:    cfg,
 		ctx:    ctx,

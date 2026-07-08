@@ -21,6 +21,8 @@ type mockRepo struct {
 	updateCaseFn                 func(ctx context.Context, vc *domain.VerificationCase) error
 	listPendingCasesFn           func(ctx context.Context, limit int) ([]domain.VerificationCase, error)
 	listCasesStuckFn             func(ctx context.Context, olderThan time.Time, limit int) ([]domain.VerificationCase, error)
+	listCasesAwaitingReviewFn    func(ctx context.Context, status domain.VerificationStatus, checkType domain.CheckType, limit int, cursor string) ([]domain.VerificationCase, error)
+	listClaimsAwaitingReviewFn   func(ctx context.Context, status domain.VerificationStatus, limit int, cursor string) ([]domain.OwnershipClaim, error)
 	createCheckFn                func(ctx context.Context, c *domain.Check) error
 	findCheckByProviderEventIDFn func(ctx context.Context, pid string) (*domain.Check, error)
 	updateCheckFn                func(ctx context.Context, c *domain.Check) error
@@ -86,6 +88,20 @@ func (m *mockRepo) ListPendingCases(ctx context.Context, limit int) ([]domain.Ve
 func (m *mockRepo) ListCasesStuckInReview(ctx context.Context, olderThan time.Time, limit int) ([]domain.VerificationCase, error) {
 	if m.listCasesStuckFn != nil {
 		return m.listCasesStuckFn(ctx, olderThan, limit)
+	}
+	return nil, nil
+}
+
+func (m *mockRepo) ListCasesAwaitingReview(ctx context.Context, status domain.VerificationStatus, checkType domain.CheckType, limit int, cursor string) ([]domain.VerificationCase, error) {
+	if m.listCasesAwaitingReviewFn != nil {
+		return m.listCasesAwaitingReviewFn(ctx, status, checkType, limit, cursor)
+	}
+	return nil, nil
+}
+
+func (m *mockRepo) ListClaimsAwaitingReview(ctx context.Context, status domain.VerificationStatus, limit int, cursor string) ([]domain.OwnershipClaim, error) {
+	if m.listClaimsAwaitingReviewFn != nil {
+		return m.listClaimsAwaitingReviewFn(ctx, status, limit, cursor)
 	}
 	return nil, nil
 }

@@ -242,11 +242,10 @@ func (s *kycService) ApplyVerdict(ctx context.Context, result domain.VerdictResu
 	s.metrics.RecordVerdict(string(result.Type), string(result.Verdict))
 
 	if check.Status.IsTerminal() {
-		var transitionErr error
-		verificationCase.Status, transitionErr = domain.NextStatus(verificationCase.Status, domain.EventSubmit)
-		if transitionErr == nil {
-			verificationCase.Status, _ = domain.NextStatus(verificationCase.Status, EventForTerminalStatus(check.Status))
+		if verificationCase.Status == domain.StatusPending {
+			verificationCase.Status, _ = domain.NextStatus(verificationCase.Status, domain.EventSubmit)
 		}
+		verificationCase.Status, _ = domain.NextStatus(verificationCase.Status, EventForTerminalStatus(check.Status))
 		if updateErr := s.repo.UpdateCase(ctx, verificationCase); updateErr != nil {
 			return fmt.Errorf("kyc: apply verdict: update case: %w", updateErr)
 		}

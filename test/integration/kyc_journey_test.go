@@ -117,7 +117,7 @@ func newJourneyEnv(t *testing.T, p verdictProvider) journeyEnv {
 
 	svc := kyc.NewService(repo, audit, p, p, p, p, p, vault, infranotify.New(), cache, queue, metrics.NewNoop())
 
-	consumer := kyc.NewQueueConsumer(repo, audit, svc, p, p, p, p, p, infranotify.New(), queue, cache, metrics.NewNoop())
+	consumer := kyc.NewQueueConsumer(repo, audit, svc, p, p, p, p, p, infranotify.New(), queue, cache, metrics.NewNoop(), false)
 
 	user := &pgmodels.UserModel{Email: "journey@pillow.test", DisplayName: "Journey User"}
 	if err := db.WithContext(ctx).Create(user).Error; err != nil {

@@ -116,6 +116,29 @@ func TestRequireAuth_ExpiredToken(t *testing.T) {
 	}
 }
 
+func TestRequireAuth_BlocklistErrorFailsOpen(t *testing.T) {
+	v := &mockValidator{
+		validateFn: func(_ string) (*domain.Claims, error) {
+			return &domain.Claims{UserID: "u1", TokenID: "jti-down"}, nil
+		},
+	}
+	bl := &mockBlocklist{
+		isBlocklistedFn: func(_ context.Context, jti string) (bool, error) {
+			return false, fmt.Errorf("redis connection refused")
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set(fiber.HeaderAuthorization, "Bearer valid.token")
+	resp, err := newProtectedApp(v, bl).Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d (fail-open on blocklist error)", resp.StatusCode, http.StatusOK)
+	}
+}
+
 func TestRequireAuth_BlocklistedToken(t *testing.T) {
 	v := &mockValidator{
 		validateFn: func(_ string) (*domain.Claims, error) {

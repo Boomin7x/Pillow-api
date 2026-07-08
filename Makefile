@@ -1,4 +1,4 @@
-.PHONY: run run-worker build build-worker test test-integration lint migrate-up migrate-down keys docker-up docker-down
+.PHONY: run run-worker build build-worker test test-integration lint migrate-up migrate-down keys docker-up docker-down grant-admin revoke-admin
 
 # ── Dev ──────────────────────────────────────────────────────────────────────
 
@@ -35,6 +35,16 @@ migrate-up:
 
 migrate-down:
 	go run ./cmd/migrate down
+
+# ── Admin ────────────────────────────────────────────────────────────────────
+
+grant-admin:
+	@test -n "$(EMAIL)" || (echo "usage: make grant-admin EMAIL=user@example.com" && exit 2)
+	go run ./cmd/adminrole grant $(EMAIL)
+
+revoke-admin:
+	@test -n "$(EMAIL)" || (echo "usage: make revoke-admin EMAIL=user@example.com" && exit 2)
+	go run ./cmd/adminrole revoke $(EMAIL)
 
 # ── Keys ─────────────────────────────────────────────────────────────────────
 

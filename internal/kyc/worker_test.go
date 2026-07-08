@@ -256,6 +256,7 @@ type queueConsumerTest struct {
 	notifier  domain.Notifier
 	queue     domain.VerificationQueue
 	cache     domain.TierCache
+	manualReview bool
 }
 
 func newQueueConsumer(repo domain.KYCRepository, svc domain.KYCService, queue domain.VerificationQueue, providers ...any) *kyc.QueueConsumer {
@@ -286,7 +287,7 @@ func newQueueConsumer(repo domain.KYCRepository, svc domain.KYCService, queue do
 			c.business = v
 		}
 	}
-	return kyc.NewQueueConsumer(c.repo, c.audit, c.service, c.identity, c.sanctions, c.ownership, c.license, c.business, c.notifier, c.queue, c.cache, &mockMetrics{})
+	return kyc.NewQueueConsumer(c.repo, c.audit, c.service, c.identity, c.sanctions, c.ownership, c.license, c.business, c.notifier, c.queue, c.cache, &mockMetrics{}, c.manualReview)
 }
 
 type metricRecorder struct {
@@ -427,7 +428,7 @@ func TestQueueConsumer_OwnershipCompletionIsAudited(t *testing.T) {
 		},
 	}
 	q := oneJobQueue(domain.VerificationJob{CaseID: "claim-1", UserID: "u1", Type: domain.CheckOwnership, PropertyAddress: "1 Main St", ClaimantName: "Alice"})
-	c := kyc.NewQueueConsumer(repo, audit, &mockKYCService{}, &mockIdentity{}, &mockSanctions{}, ownership, &mockLicense{}, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, &mockMetrics{})
+	c := kyc.NewQueueConsumer(repo, audit, &mockKYCService{}, &mockIdentity{}, &mockSanctions{}, ownership, &mockLicense{}, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, &mockMetrics{}, false)
 
 	c.RunOnce(context.Background())
 
@@ -523,7 +524,7 @@ func TestMetrics_LatencyRecordedOnQueueConsumer(t *testing.T) {
 		},
 	}
 	q := oneJobQueue(domain.VerificationJob{CaseID: "c1", UserID: "u1", Type: domain.CheckLicense, LicenseNumber: "LIC-1", Jurisdiction: "CA"})
-	c := kyc.NewQueueConsumer(repo, &mockAudit{}, svc, &mockIdentity{}, &mockSanctions{}, &mockOwnership{}, license, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met)
+	c := kyc.NewQueueConsumer(repo, &mockAudit{}, svc, &mockIdentity{}, &mockSanctions{}, &mockOwnership{}, license, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met, false)
 	c.RunOnce(context.Background())
 
 	if len(rec.latencies) == 0 {
@@ -544,7 +545,7 @@ func TestMetrics_CircuitOpenIncrementedOnSanctionsFailure(t *testing.T) {
 		},
 	}
 	q := oneJobQueue(domain.VerificationJob{CaseID: "c1", UserID: "u1", Type: domain.CheckSanctions})
-	c := kyc.NewQueueConsumer(repo, &mockAudit{}, &mockKYCService{}, &mockIdentity{}, sanctions, &mockOwnership{}, &mockLicense{}, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met)
+	c := kyc.NewQueueConsumer(repo, &mockAudit{}, &mockKYCService{}, &mockIdentity{}, sanctions, &mockOwnership{}, &mockLicense{}, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met, false)
 	c.RunOnce(context.Background())
 
 	if len(rec.circuits) != 1 {
@@ -563,7 +564,7 @@ func TestMetrics_EmptyQueueProducesNoMetrics(t *testing.T) {
 			return nil, nil
 		},
 	}
-	c := kyc.NewQueueConsumer(&mockRepo{}, &mockAudit{}, &mockKYCService{}, &mockIdentity{}, &mockSanctions{}, &mockOwnership{}, &mockLicense{}, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met)
+	c := kyc.NewQueueConsumer(&mockRepo{}, &mockAudit{}, &mockKYCService{}, &mockIdentity{}, &mockSanctions{}, &mockOwnership{}, &mockLicense{}, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met, false)
 	c.RunOnce(context.Background())
 
 	if len(rec.latencies) != 0 {
@@ -575,7 +576,7 @@ func TestMetrics_UnknownJobTypeDoesNotPanic(t *testing.T) {
 	rec := &metricRecorder{}
 	met := &metricsDelegate{rec: rec}
 	q := oneJobQueue(domain.VerificationJob{CaseID: "c1", UserID: "u1", Type: "unknown"})
-	c := kyc.NewQueueConsumer(&mockRepo{}, &mockAudit{}, &mockKYCService{}, &mockIdentity{}, &mockSanctions{}, &mockOwnership{}, &mockLicense{}, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met)
+	c := kyc.NewQueueConsumer(&mockRepo{}, &mockAudit{}, &mockKYCService{}, &mockIdentity{}, &mockSanctions{}, &mockOwnership{}, &mockLicense{}, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met, false)
 	c.RunOnce(context.Background())
 }
 
@@ -585,7 +586,7 @@ func TestMetrics_QueueDepthEmittedEachRun(t *testing.T) {
 	q := &mockQueue{
 		lenFn: func(_ context.Context) (int, error) { return 7, nil },
 	}
-	c := kyc.NewQueueConsumer(&mockRepo{}, &mockAudit{}, &mockKYCService{}, &mockIdentity{}, &mockSanctions{}, &mockOwnership{}, &mockLicense{}, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met)
+	c := kyc.NewQueueConsumer(&mockRepo{}, &mockAudit{}, &mockKYCService{}, &mockIdentity{}, &mockSanctions{}, &mockOwnership{}, &mockLicense{}, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met, false)
 
 	c.RunOnce(context.Background())
 
@@ -603,7 +604,7 @@ func TestMetrics_CircuitOpenCountedForNonSanctionsProvider(t *testing.T) {
 		},
 	}
 	q := oneJobQueue(domain.VerificationJob{CaseID: "c1", UserID: "u1", Type: domain.CheckLicense, LicenseNumber: "LIC-1"})
-	c := kyc.NewQueueConsumer(&mockRepo{}, &mockAudit{}, &mockKYCService{}, &mockIdentity{}, &mockSanctions{}, &mockOwnership{}, license, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met)
+	c := kyc.NewQueueConsumer(&mockRepo{}, &mockAudit{}, &mockKYCService{}, &mockIdentity{}, &mockSanctions{}, &mockOwnership{}, license, &mockBusiness{}, &mockNotifier{}, q, &mockTierCache{}, met, false)
 
 	c.RunOnce(context.Background())
 

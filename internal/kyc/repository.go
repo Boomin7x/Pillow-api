@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kodiahbertrand/pillow/internal/apperrors"
@@ -218,6 +219,62 @@ func (r *kycRepository) ListChecksExpiringBefore(ctx context.Context, t time.Tim
 		checks[i] = *models[i].ToDomain()
 	}
 	return checks, nil
+}
+
+func (r *kycRepository) ListCasesAwaitingReview(ctx context.Context, status domain.VerificationStatus, checkType domain.CheckType, limit int, cursor string) ([]domain.VerificationCase, error) {
+	q := r.db.WithContext(ctx).Where("status = ?", string(status))
+	if checkType != "" {
+		q = q.Where("type = ?", string(checkType))
+	}
+	q, err := applyReviewCursor(q, cursor)
+	if err != nil {
+		return nil, err
+	}
+	var models []pgmodels.VerificationCaseModel
+	if err := q.Order("created_at ASC, id ASC").Limit(limit).Find(&models).Error; err != nil {
+		return nil, fmt.Errorf("kyc: list cases awaiting review: %w", err)
+	}
+	cases := make([]domain.VerificationCase, len(models))
+	for i := range models {
+		cases[i] = *models[i].ToDomain()
+	}
+	return cases, nil
+}
+
+func (r *kycRepository) ListClaimsAwaitingReview(ctx context.Context, status domain.VerificationStatus, limit int, cursor string) ([]domain.OwnershipClaim, error) {
+	q := r.db.WithContext(ctx).Where("status = ?", string(status))
+	q, err := applyReviewCursor(q, cursor)
+	if err != nil {
+		return nil, err
+	}
+	var models []pgmodels.OwnershipClaimModel
+	if err := q.Order("created_at ASC, id ASC").Limit(limit).Find(&models).Error; err != nil {
+		return nil, fmt.Errorf("kyc: list claims awaiting review: %w", err)
+	}
+	claims := make([]domain.OwnershipClaim, len(models))
+	for i := range models {
+		claims[i] = *models[i].ToDomain()
+	}
+	return claims, nil
+}
+
+func EncodeReviewCursor(createdAt time.Time, id string) string {
+	return createdAt.UTC().Format(time.RFC3339Nano) + "|" + id
+}
+
+func applyReviewCursor(q *gorm.DB, cursor string) (*gorm.DB, error) {
+	if cursor == "" {
+		return q, nil
+	}
+	sep := strings.LastIndex(cursor, "|")
+	if sep <= 0 || sep == len(cursor)-1 {
+		return nil, apperrors.BadRequest("invalid cursor")
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, cursor[:sep])
+	if err != nil {
+		return nil, apperrors.BadRequest("invalid cursor")
+	}
+	return q.Where("(created_at, id) > (?, ?)", createdAt, cursor[sep+1:]), nil
 }
 
 func (r *kycRepository) ListProfilesForRescreen(ctx context.Context, minTier domain.Tier, limit int, cursor string) ([]domain.KYCProfile, error) {

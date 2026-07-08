@@ -135,4 +135,15 @@ func registerRoutes(f *fiber.App, deps routeDeps) {
 		middleware.LimitByIP(deps.rateLimiter, "kyc_business", deps.rl.KYCBusinessIPLimit, deps.rl.KYCBusinessIPWindow),
 		deps.kyc.startBusinessVerif,
 	)
+
+	adminGroup := f.Group("/admin")
+	adminGroup.Use(
+		middleware.RequireAuth(deps.issuer, deps.authRepo),
+		middleware.RequireRole("admin"),
+		middleware.LimitByIP(deps.rateLimiter, "admin", deps.rl.AdminIPLimit, deps.rl.AdminIPWindow),
+	)
+
+	adminGroup.Get("/ping", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"status": "ok"})
+	})
 }

@@ -12,6 +12,7 @@ import (
 	pgmodels "github.com/kodiahbertrand/pillow/internal/infrastructure/postgres"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type authRepository struct {
@@ -57,6 +58,40 @@ func (r *authRepository) FindUserByID(ctx context.Context, id string) (*domain.U
 		return nil, fmt.Errorf("auth: find user by id: %w", err)
 	}
 	return model.ToDomain(), nil
+}
+
+func (r *authRepository) AssignRole(ctx context.Context, userID, role string) error {
+	model := &pgmodels.UserRoleModel{UserID: userID, Role: role}
+	if err := r.db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "user_id"}, {Name: "role"}},
+			DoNothing: true,
+		}).
+		Create(model).Error; err != nil {
+		return fmt.Errorf("auth: assign role: %w", err)
+	}
+	return nil
+}
+
+func (r *authRepository) RemoveRole(ctx context.Context, userID, role string) error {
+	if err := r.db.WithContext(ctx).
+		Where("user_id = ? AND role = ?", userID, role).
+		Delete(&pgmodels.UserRoleModel{}).Error; err != nil {
+		return fmt.Errorf("auth: remove role: %w", err)
+	}
+	return nil
+}
+
+func (r *authRepository) ListRoles(ctx context.Context, userID string) ([]string, error) {
+	var roles []string
+	if err := r.db.WithContext(ctx).
+		Model(&pgmodels.UserRoleModel{}).
+		Where("user_id = ?", userID).
+		Order("created_at ASC").
+		Pluck("role", &roles).Error; err != nil {
+		return nil, fmt.Errorf("auth: list roles: %w", err)
+	}
+	return roles, nil
 }
 
 func (r *authRepository) CreateCredential(ctx context.Context, c *domain.Credential) error {

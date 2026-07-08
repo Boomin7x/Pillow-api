@@ -311,17 +311,20 @@ func TestLogoutHandler_Success(t *testing.T) {
 		t.Error("expected service.Logout to be called")
 	}
 
-	clearedCookie := false
+	var clearedCookie *http.Cookie
 	for _, ck := range resp.Cookies() {
-		if ck.Name != "refresh_token" {
-			continue
-		}
-		if ck.Value == "" || ck.MaxAge < 0 || (!ck.Expires.IsZero() && ck.Expires.Before(time.Now())) {
-			clearedCookie = true
+		if ck.Name == "refresh_token" {
+			clearedCookie = ck
 		}
 	}
-	if !clearedCookie {
-		t.Error("expected refresh_token cookie to be cleared on logout")
+	if clearedCookie == nil {
+		t.Fatal("expected refresh_token Set-Cookie in logout response")
+	}
+	if clearedCookie.Path != "/auth/refresh" {
+		t.Errorf("cookie path = %q, want %q", clearedCookie.Path, "/auth/refresh")
+	}
+	if clearedCookie.MaxAge >= 0 && (clearedCookie.Expires.IsZero() || clearedCookie.Expires.After(time.Now())) {
+		t.Error("expected refresh_token cookie to have past expiry or negative MaxAge")
 	}
 
 	_, _ = io.ReadAll(resp.Body)
@@ -364,6 +367,19 @@ func TestLogoutAllHandler_Success(t *testing.T) {
 	}
 	if calledWithUser != "u1" {
 		t.Errorf("LogoutAll called with user %q, want %q", calledWithUser, "u1")
+	}
+
+	var clearedCookie *http.Cookie
+	for _, ck := range resp.Cookies() {
+		if ck.Name == "refresh_token" {
+			clearedCookie = ck
+		}
+	}
+	if clearedCookie == nil {
+		t.Fatal("expected refresh_token Set-Cookie in logout-all response")
+	}
+	if clearedCookie.Path != "/auth/refresh" {
+		t.Errorf("cookie path = %q, want %q", clearedCookie.Path, "/auth/refresh")
 	}
 }
 

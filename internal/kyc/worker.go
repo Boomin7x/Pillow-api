@@ -279,18 +279,19 @@ func (v *VaultPurger) RunOnce(ctx context.Context) {
 }
 
 type QueueConsumer struct {
-	repo      domain.KYCRepository
-	audit     domain.AuditRepository
-	service   domain.KYCService
-	identity  domain.IdentityVerifier
-	sanctions domain.SanctionsScreener
-	ownership domain.OwnershipVerifier
-	license   domain.LicenseVerifier
-	business  domain.BusinessVerifier
-	notifier  domain.Notifier
-	queue     domain.VerificationQueue
-	cache     domain.TierCache
-	metrics   metrics.Metrics
+	repo         domain.KYCRepository
+	audit        domain.AuditRepository
+	service      domain.KYCService
+	identity     domain.IdentityVerifier
+	sanctions    domain.SanctionsScreener
+	ownership    domain.OwnershipVerifier
+	license      domain.LicenseVerifier
+	business     domain.BusinessVerifier
+	notifier     domain.Notifier
+	queue        domain.VerificationQueue
+	cache        domain.TierCache
+	metrics      metrics.Metrics
+	manualReview bool
 }
 
 func NewQueueConsumer(
@@ -306,20 +307,22 @@ func NewQueueConsumer(
 	queue domain.VerificationQueue,
 	cache domain.TierCache,
 	met metrics.Metrics,
+	manualReview bool,
 ) *QueueConsumer {
 	return &QueueConsumer{
-		repo:      repo,
-		audit:     audit,
-		service:   service,
-		identity:  identity,
-		sanctions: sanctions,
-		ownership: ownership,
-		license:   license,
-		business:  business,
-		notifier:  notifier,
-		queue:     queue,
-		cache:     cache,
-		metrics:   met,
+		repo:         repo,
+		audit:        audit,
+		service:      service,
+		identity:     identity,
+		sanctions:    sanctions,
+		ownership:    ownership,
+		license:      license,
+		business:     business,
+		notifier:     notifier,
+		queue:        queue,
+		cache:        cache,
+		metrics:      met,
+		manualReview: manualReview,
 	}
 }
 
@@ -366,6 +369,9 @@ func (c *QueueConsumer) timedProviderCall(provider string, fn func() error) erro
 }
 
 func (c *QueueConsumer) processJob(ctx context.Context, job *domain.VerificationJob) error {
+	if c.manualReview {
+		return c.parkForManualReview(ctx, job)
+	}
 	switch job.Type {
 	case domain.CheckLicense:
 		var result *domain.ProviderCheckResult
@@ -542,4 +548,89 @@ func (c *QueueConsumer) processJob(ctx context.Context, job *domain.Verification
 		slog.Warn("kyc: queue consumer: unknown job type", "type", job.Type)
 		return nil
 	}
+}
+
+func (c *QueueConsumer) parkForManualReview(ctx context.Context, job *domain.VerificationJob) error {
+	if job.Type == domain.CheckOwnership {
+		return c.parkClaimForManualReview(ctx, job)
+	}
+
+	verificationCase, err := c.repo.FindCaseByID(ctx, job.CaseID)
+	if err != nil {
+		return fmt.Errorf("manual review: find case: %w", err)
+	}
+
+	check := &domain.Check{
+		CaseID:     job.CaseID,
+		Type:       job.Type,
+		Status:     domain.StatusInReview,
+		Verdict:    domain.VerdictReview,
+		RawPayload: manualReviewPayload(job),
+	}
+	if err := c.repo.CreateCheck(ctx, check); err != nil {
+		return fmt.Errorf("manual review: create check: %w", err)
+	}
+
+	if verificationCase.Status == domain.StatusPending {
+		next, transitionErr := domain.NextStatus(verificationCase.Status, domain.EventSubmit)
+		if transitionErr == nil {
+			verificationCase.Status = next
+			if err := c.repo.UpdateCase(ctx, verificationCase); err != nil {
+				return fmt.Errorf("manual review: update case: %w", err)
+			}
+		}
+	}
+
+	if appendErr := c.audit.Append(ctx, &domain.AuditEvent{
+		UserID:    job.UserID,
+		EventType: "kyc_case_awaiting_manual_review",
+		Metadata:  map[string]any{"case_id": job.CaseID, "type": string(job.Type)},
+	}); appendErr != nil {
+		slog.Error("kyc: manual review: audit append failed", "error", appendErr, "case_id", job.CaseID)
+	}
+	slog.Info("kyc: case parked for manual review", "case_id", job.CaseID, "type", job.Type)
+	return nil
+}
+
+func (c *QueueConsumer) parkClaimForManualReview(ctx context.Context, job *domain.VerificationJob) error {
+	claim, err := c.repo.FindOwnershipClaimByID(ctx, job.CaseID)
+	if err != nil {
+		return fmt.Errorf("manual review: find ownership claim: %w", err)
+	}
+
+	claim.Status = domain.StatusInReview
+	claim.Method = domain.OwnershipMethodManualReview
+	if err := c.repo.UpdateOwnershipClaim(ctx, claim); err != nil {
+		return fmt.Errorf("manual review: update ownership claim: %w", err)
+	}
+
+	if appendErr := c.audit.Append(ctx, &domain.AuditEvent{
+		UserID:    job.UserID,
+		EventType: "ownership_claim_awaiting_manual_review",
+		Metadata:  map[string]any{"claim_id": claim.ID},
+	}); appendErr != nil {
+		slog.Error("kyc: manual review: audit append failed", "error", appendErr, "claim_id", claim.ID)
+	}
+	slog.Info("kyc: ownership claim parked for manual review", "claim_id", claim.ID)
+	return nil
+}
+
+func manualReviewPayload(job *domain.VerificationJob) map[string]any {
+	payload := map[string]any{"source": "manual_review_queue"}
+	if job.DocumentReference != "" {
+		payload["document_reference"] = string(job.DocumentReference)
+	}
+	if job.LicenseNumber != "" {
+		payload["license_number"] = job.LicenseNumber
+	}
+	if job.Jurisdiction != "" {
+		payload["jurisdiction"] = job.Jurisdiction
+	}
+	if job.BusinessName != "" {
+		payload["business_name"] = job.BusinessName
+	}
+	if job.RegistrationNumber != "" {
+		payload["registration_number"] = job.RegistrationNumber
+	}
+	return payload
 }

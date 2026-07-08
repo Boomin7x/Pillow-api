@@ -3,6 +3,7 @@ package tokenutil
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -22,6 +23,8 @@ type jwtIssuer struct {
 	publicKey  *rsa.PublicKey
 	accessTTL  time.Duration
 	keyID      string
+	issuer     string
+	audience   string
 }
 
 func NewJWTIssuer(cfg config.JWTConfig) (domain.TokenIssuer, error) {
@@ -68,11 +71,15 @@ func NewJWTIssuer(cfg config.JWTConfig) (domain.TokenIssuer, error) {
 		return nil, fmt.Errorf("tokenutil: public key is not RSA")
 	}
 
+	fingerprint := sha256.Sum256(pubBlock.Bytes)
+
 	return &jwtIssuer{
 		privateKey: rsaPriv,
 		publicKey:  rsaPub,
 		accessTTL:  cfg.AccessTTL,
-		keyID:      "pillow-" + time.Now().Format("2006-q1"),
+		keyID:      fmt.Sprintf("pillow-%x", fingerprint[:8]),
+		issuer:     cfg.Issuer,
+		audience:   cfg.Audience,
 	}, nil
 }
 
@@ -85,6 +92,8 @@ func (j *jwtIssuer) IssueAccessToken(claims domain.Claims) (string, error) {
 		"roles": claims.Roles,
 		"sid":   claims.SessionID,
 		"jti":   claims.TokenID,
+		"iss":   j.issuer,
+		"aud":   j.audience,
 		"iat":   now.Unix(),
 		"exp":   now.Add(j.accessTTL).Unix(),
 	}
@@ -114,7 +123,7 @@ func (j *jwtIssuer) ValidateAccessToken(raw string) (*domain.Claims, error) {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		return j.publicKey, nil
-	})
+	}, jwt.WithIssuer(j.issuer), jwt.WithAudience(j.audience))
 	if err != nil {
 		return nil, fmt.Errorf("tokenutil: validate token: %w", err)
 	}

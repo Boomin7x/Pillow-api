@@ -40,6 +40,30 @@ type mockRepo struct {
 	deleteCachedTokenFn                  func(ctx context.Context, hash string) error
 	blocklistTokenFn                     func(ctx context.Context, jti string, ttl time.Duration) error
 	isTokenBlocklistedFn                 func(ctx context.Context, jti string) (bool, error)
+	assignRoleFn                         func(ctx context.Context, userID, role string) error
+	removeRoleFn                         func(ctx context.Context, userID, role string) error
+	listRolesFn                          func(ctx context.Context, userID string) ([]string, error)
+}
+
+func (m *mockRepo) AssignRole(ctx context.Context, userID, role string) error {
+	if m.assignRoleFn != nil {
+		return m.assignRoleFn(ctx, userID, role)
+	}
+	return nil
+}
+
+func (m *mockRepo) RemoveRole(ctx context.Context, userID, role string) error {
+	if m.removeRoleFn != nil {
+		return m.removeRoleFn(ctx, userID, role)
+	}
+	return nil
+}
+
+func (m *mockRepo) ListRoles(ctx context.Context, userID string) ([]string, error) {
+	if m.listRolesFn != nil {
+		return m.listRolesFn(ctx, userID)
+	}
+	return nil, nil
 }
 
 func (m *mockRepo) CreateUser(ctx context.Context, u *domain.User) error {
@@ -654,6 +678,98 @@ func TestChangePassword_UpdateError(t *testing.T) {
 	}
 }
 
+func TestChangePassword_NoCredentialReturnsBadRequest(t *testing.T) {
+	repo := &mockRepo{
+		findCredentialByUserIDFn: func(_ context.Context, _ string) (*domain.Credential, error) {
+			return nil, apperrors.NotFound("credential not found")
+		},
+	}
+
+	svc := auth.NewService(repo, okIssuer(), noopLogger())
+	err := svc.ChangePassword(context.Background(), domain.ChangePasswordInput{
+		UserID:      "oauth-only-user",
+		OldPassword: "whatever",
+		NewPassword: "newpassword123",
+	})
+
+	var appErr *apperrors.AppError
+	if !errors.As(err, &appErr) || appErr.Code != apperrors.CodeBadRequest {
+		t.Fatalf("expected BadRequest for an account with no password, got %v", err)
+	}
+}
+
+func TestIssuedTokenCarriesRolesFromRepository(t *testing.T) {
+	cases := []struct {
+		name      string
+		listRoles func(ctx context.Context, userID string) ([]string, error)
+		wantRoles []string
+	}{
+		{
+			name: "roles loaded from the user record",
+			listRoles: func(_ context.Context, _ string) ([]string, error) {
+				return []string{"user", "admin"}, nil
+			},
+			wantRoles: []string{"user", "admin"},
+		},
+		{
+			name: "no stored roles falls back to baseline",
+			listRoles: func(_ context.Context, _ string) ([]string, error) {
+				return nil, nil
+			},
+			wantRoles: []string{"user"},
+		},
+		{
+			name: "list failure falls back to baseline, never elevates",
+			listRoles: func(_ context.Context, _ string) ([]string, error) {
+				return nil, fmt.Errorf("db down")
+			},
+			wantRoles: []string{"user"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured domain.Claims
+			issuer := &mockIssuer{
+				issueAccessFn: func(claims domain.Claims) (string, error) {
+					captured = claims
+					return "access-token", nil
+				},
+				issueRefreshFn: func() (string, error) { return "refresh-token", nil },
+			}
+			repo := &mockRepo{
+				createUserFn:       func(_ context.Context, u *domain.User) error { u.ID = "u1"; return nil },
+				createCredentialFn: func(_ context.Context, _ *domain.Credential) error { return nil },
+				storeRefreshTokenFn: func(_ context.Context, _ *domain.RefreshToken) error {
+					return nil
+				},
+				cacheRefreshTokenFn: func(_ context.Context, _ string, _ domain.RefreshTokenMeta, _ time.Duration) error {
+					return nil
+				},
+				listRolesFn: tc.listRoles,
+			}
+
+			svc := auth.NewService(repo, issuer, noopLogger())
+			if _, err := svc.Register(context.Background(), domain.RegisterInput{
+				Email:       "roles@example.com",
+				Password:    "supersecret123",
+				DisplayName: "Roles",
+			}); err != nil {
+				t.Fatalf("register: %v", err)
+			}
+
+			if len(captured.Roles) != len(tc.wantRoles) {
+				t.Fatalf("roles = %v, want %v", captured.Roles, tc.wantRoles)
+			}
+			for i, r := range tc.wantRoles {
+				if captured.Roles[i] != r {
+					t.Errorf("roles[%d] = %q, want %q", i, captured.Roles[i], r)
+				}
+			}
+		})
+	}
+}
+
 func TestRegister_StoreRefreshTokenError(t *testing.T) {
 	repo := &mockRepo{
 		createUserFn: func(_ context.Context, u *domain.User) error {
@@ -884,6 +1000,71 @@ func TestOAuthLogin_NewUser(t *testing.T) {
 	}
 	if upsertedIdentity == nil || upsertedIdentity.ProviderID != "g-sub-123" {
 		t.Error("expected UpsertOAuthIdentity to be called with correct provider_id")
+	}
+}
+
+func TestOAuthLogin_NewUser_UsesNameAsDisplayName(t *testing.T) {
+	var createdUser *domain.User
+
+	repo := &mockRepo{
+		findOAuthIdentityFn: func(_ context.Context, _, _ string) (*domain.OAuthIdentity, error) {
+			return nil, apperrors.NotFound("not found")
+		},
+		findUserByEmailFn: func(_ context.Context, _ string) (*domain.User, error) {
+			return nil, apperrors.NotFound("not found")
+		},
+		createUserFn: func(_ context.Context, u *domain.User) error {
+			u.ID = "new-user-id"
+			createdUser = u
+			return nil
+		},
+		upsertOAuthIdentityFn: func(_ context.Context, _ *domain.OAuthIdentity) error { return nil },
+		storeRefreshTokenFn:   func(_ context.Context, _ *domain.RefreshToken) error { return nil },
+	}
+
+	_, err := oauthSvc(repo).OAuthLogin(context.Background(), domain.OAuthLoginInput{
+		Provider:   "google",
+		ProviderID: "g-sub-456",
+		Email:      "bob@example.com",
+		Name:       "Bob Smith",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if createdUser == nil || createdUser.DisplayName != "Bob Smith" {
+		t.Errorf("DisplayName = %q, want %q", createdUser.DisplayName, "Bob Smith")
+	}
+}
+
+func TestOAuthLogin_NewUser_FallsBackToEmail(t *testing.T) {
+	var createdUser *domain.User
+
+	repo := &mockRepo{
+		findOAuthIdentityFn: func(_ context.Context, _, _ string) (*domain.OAuthIdentity, error) {
+			return nil, apperrors.NotFound("not found")
+		},
+		findUserByEmailFn: func(_ context.Context, _ string) (*domain.User, error) {
+			return nil, apperrors.NotFound("not found")
+		},
+		createUserFn: func(_ context.Context, u *domain.User) error {
+			u.ID = "new-user-id"
+			createdUser = u
+			return nil
+		},
+		upsertOAuthIdentityFn: func(_ context.Context, _ *domain.OAuthIdentity) error { return nil },
+		storeRefreshTokenFn:   func(_ context.Context, _ *domain.RefreshToken) error { return nil },
+	}
+
+	_, err := oauthSvc(repo).OAuthLogin(context.Background(), domain.OAuthLoginInput{
+		Provider:   "google",
+		ProviderID: "g-sub-789",
+		Email:      "carol@example.com",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if createdUser == nil || createdUser.DisplayName != "carol@example.com" {
+		t.Errorf("DisplayName = %q, want %q", createdUser.DisplayName, "carol@example.com")
 	}
 }
 

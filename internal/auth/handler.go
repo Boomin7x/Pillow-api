@@ -118,7 +118,7 @@ func (h *authHandler) Logout(c *fiber.Ctx) error {
 		return err
 	}
 
-	c.ClearCookie(refreshCookieName)
+	h.clearRefreshCookie(c)
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
@@ -136,7 +136,7 @@ func (h *authHandler) LogoutAll(c *fiber.Ctx) error {
 		return err
 	}
 
-	c.ClearCookie(refreshCookieName)
+	h.clearRefreshCookie(c)
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
@@ -208,6 +208,7 @@ func (h *authHandler) OAuthCallback(c *fiber.Ctx) error {
 		Provider:   "google",
 		ProviderID: claims.ProviderID,
 		Email:      claims.Email,
+		Name:       claims.Name,
 		IPAddress:  c.IP(),
 		UserAgent:  c.Get(fiber.HeaderUserAgent),
 	})
@@ -228,6 +229,19 @@ func (h *authHandler) setRefreshCookie(c *fiber.Ctx, token string) {
 		SameSite: "Strict",
 		MaxAge:   int((30 * 24 * time.Hour).Seconds()),
 		Path:     "/auth/refresh",
+	})
+}
+
+func (h *authHandler) clearRefreshCookie(c *fiber.Ctx) {
+	c.Cookie(&fiber.Cookie{
+		Name:     refreshCookieName,
+		Value:    "",
+		Path:     "/auth/refresh",
+		Expires:  time.Now().Add(-time.Hour),
+		MaxAge:   -1,
+		HTTPOnly: true,
+		Secure:   true,
+		SameSite: "Strict",
 	})
 }
 
